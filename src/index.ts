@@ -27,17 +27,23 @@ import { initRealtime } from './ws/realtime';
 import { apiLimiter } from './middleware/rateLimit';
 
 const app    = express();
-// Trust proxy settings (required for express-rate-limit to read X-Forwarded-For headers correctly behind tunnels)
+// Trust proxy settings (required for rate limiting behind reverse proxies like Back4App / Cloudflare)
 app.set('trust proxy', 1);
 const server = createServer(app);
 const PORT   = process.env.PORT || 3001;
-const FRONTEND_URL   = process.env.FRONTEND_URL   || 'http://localhost:5173';
-const SESSION_SECRET = process.env.SESSION_SECRET  || 'dev-secret-change-me';
+
+// Support single URL or comma-separated list of allowed frontend origins
+const rawFrontendUrls = process.env.FRONTEND_URL || 'http://localhost:5173';
+const allowedOrigins  = rawFrontendUrls.includes(',')
+  ? rawFrontendUrls.split(',').map((u) => u.trim()).filter(Boolean)
+  : rawFrontendUrls.trim();
+
+const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret-change-me';
 
 // ── Socket.IO server ────────────────────────────────────
 export const io = new SocketIOServer(server, {
   cors: {
-    origin: FRONTEND_URL,
+    origin: allowedOrigins,
     credentials: true,
   },
 });
@@ -55,7 +61,7 @@ app.use(apiLimiter);
 // ── Express middleware ──────────────────────────────────
 app.use(
   cors({
-    origin: FRONTEND_URL,
+    origin: allowedOrigins,
     credentials: true,
   })
 );
@@ -101,7 +107,7 @@ initRealtime(io);
 
 // ── Start ────────────────────────────────────────────────
 server.listen(PORT, () => {
-  console.log(`\n✅  Track Manager API   → http://localhost:${PORT}`);
-  console.log(`   WebSocket (socket.io) → ws://localhost:${PORT}`);
-  console.log(`   CORS origin           → ${FRONTEND_URL}\n`);
+  console.log(`\n✅  Track Manager API   → Port ${PORT}`);
+  console.log(`   WebSocket (socket.io) → Port ${PORT}`);
+  console.log(`   CORS origins          → ${rawFrontendUrls}\n`);
 });
