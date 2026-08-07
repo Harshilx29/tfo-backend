@@ -1,26 +1,23 @@
-import { Router, Request } from 'express';
-import { supabase } from '../lib/supabase';
-import { verifyJWT, AuthenticatedRequest } from '../middleware/auth';
+import { Hono } from 'hono';
+import { getSupabase, Env } from '../lib/supabase';
+import { verifyJWT, AuthedContext } from '../middleware/auth';
 import { requireAdmin } from '../middleware/permission';
-import { v4 as uuidv4 } from 'uuid';
 import { tempLinkLimiter } from '../middleware/rateLimit';
-import { tempLinkCreateSchema, validateBody } from '../lib/validators';
+import { tempLinkCreateSchema, validateData } from '../lib/validators';
 
-const router = Router();
+type Vars = { userId?: string; profile?: any; tempAccess?: any };
+const router = new Hono<{ Bindings: Env; Variables: Vars }>();
 
-// ── GET /temp-links/validate/:token ─────────────────────────
+// GET /temp-links/validate/:token
 // PUBLIC — no auth. Called by frontend when a user opens an access link.
 // Increments use_count and logs access on every valid call.
-// tempLinkLimiter: 20 attempts per 5 min per IP — prevents token brute-force.
-router.get('/validate/:token', tempLinkLimiter, async (req: Request, res) => {
-  const { token } = req.params;
-  const ua = (req.headers['user-agent'] || '').substring(0, 500);
-  const ip =
-    (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
-    req.socket.remoteAddress ||
-    '';
+router.get('/validate/:token', tempLinkLimiter, async (c: AuthedContext) => {
+  const token = c.req.param('token');
+  const ua = (c.req.header('User-Agent') || '').substring(0, 500);
+  const ip = c.req.header('CF-Connecting-IP') || '';
 
   try {
+    const supabase = getSupabase(c.env);
     const { data: link, error } = await supabase
       .from('temp_access_links')
       .select('*')
@@ -29,31 +26,33 @@ router.get('/validate/:token', tempLinkLimiter, async (req: Request, res) => {
       .single();
 
     if (error || !link) {
-      return res.status(404).json({ error: 'Invalid or revoked link' });
+      return c.json({ error: 'Invalid or revoked link' }, 404);
     }
 
     if (new Date(link.expires_at) < new Date()) {
-      return res.status(403).json({ error: 'Link has expired' });
+      return c.json({ error: 'Link has expired' }, 403);
     }
 
     if (link.max_uses !== null && link.use_count >= link.max_uses) {
-      return res.status(403).json({ error: 'Link has reached its maximum uses' });
+      return c.json({ error: 'Link has reached its maximum uses' }, 403);
     }
 
     // Log and increment in parallel (best-effort, non-blocking)
-    void Promise.all([
-      supabase.from('temp_access_logs').insert({
-        link_id: link.id,
-        ip_address: ip,
-        user_agent: ua,
-      }),
-      supabase
-        .from('temp_access_links')
-        .update({ use_count: link.use_count + 1 })
-        .eq('id', link.id),
-    ]);
+    c.executionCtx.waitUntil(
+      Promise.all([
+        supabase.from('temp_access_logs').insert({
+          link_id: link.id,
+          ip_address: ip,
+          user_agent: ua,
+        }),
+        supabase
+          .from('temp_access_links')
+          .update({ use_count: link.use_count + 1 })
+          .eq('id', link.id),
+      ])
+    );
 
-    return res.json({
+    return c.json({
       valid: true,
       allowed_pages: link.allowed_pages,
       label: link.label,
@@ -61,45 +60,49 @@ router.get('/validate/:token', tempLinkLimiter, async (req: Request, res) => {
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
-    return res.status(500).json({ error: msg });
+    return c.json({ error: msg }, 500);
   }
 });
 
-// ── GET /temp-links ────────────────────────────────────
-router.get('/', verifyJWT, requireAdmin(), async (_req: AuthenticatedRequest, res) => {
+// GET /temp-links
+router.get('/', verifyJWT, requireAdmin(), async (c: AuthedContext) => {
   try {
+    const supabase = getSupabase(c.env);
     const { data, error } = await supabase
       .from('temp_access_links')
       .select('*')
       .order('created_at', { ascending: false });
 
     if (error) throw error;
-    return res.json(data ?? []);
+    return c.json(data ?? []);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
-    return res.status(500).json({ error: msg });
+    return c.json({ error: msg }, 500);
   }
 });
 
-// ── POST /temp-links ───────────────────────────────────
-router.post('/', verifyJWT, requireAdmin(), async (req: AuthenticatedRequest, res) => {
-  // Zod validates: expires_at is ISO datetime + in future, max_uses is positive int,
-  // allowed_pages only contains known page names, label max 200 chars
-  const body = validateBody(req, res, tempLinkCreateSchema);
-  if (!body) return;
-
-  const { label, expires_at, max_uses, allowed_pages } = body;
-
+// POST /temp-links
+router.post('/', verifyJWT, requireAdmin(), async (c: AuthedContext) => {
   try {
-    // Generate a URL-safe token (32 hex chars)
-    const token = uuidv4().replace(/-/g, '');
+    const body = await c.req.json();
+    const parsed = validateData(body, tempLinkCreateSchema);
+    if (!parsed.success) {
+      return c.json({ error: 'Validation failed', details: parsed.issues }, 400);
+    }
+
+    const { label, expires_at, max_uses, allowed_pages } = parsed.data;
+    const userId = c.get('userId');
+    const supabase = getSupabase(c.env);
+
+    // Generate a URL-safe token (32 hex chars) using native Web Crypto randomUUID
+    const token = crypto.randomUUID().replace(/-/g, '');
 
     const { data, error } = await supabase
       .from('temp_access_links')
       .insert({
         token,
         label: label?.trim() || null,
-        created_by: req.userId,
+        created_by: userId,
         allowed_pages: allowed_pages ?? ['dashboard', 'track'],
         expires_at,
         max_uses: max_uses ?? null,
@@ -108,28 +111,29 @@ router.post('/', verifyJWT, requireAdmin(), async (req: AuthenticatedRequest, re
       .single();
 
     if (error) throw error;
-    return res.status(201).json(data);
+    return c.json(data, 201);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
-    return res.status(500).json({ error: msg });
+    return c.json({ error: msg }, 500);
   }
 });
 
-// ── DELETE /temp-links/:id ─────────────────────────────
+// DELETE /temp-links/:id
 // Soft-delete (set is_active = false).
-router.delete('/:id', verifyJWT, requireAdmin(), async (req: AuthenticatedRequest, res) => {
-  const { id } = req.params;
+router.delete('/:id', verifyJWT, requireAdmin(), async (c: AuthedContext) => {
+  const id = c.req.param('id');
   try {
+    const supabase = getSupabase(c.env);
     const { error } = await supabase
       .from('temp_access_links')
       .update({ is_active: false })
       .eq('id', id);
 
     if (error) throw error;
-    return res.json({ success: true });
+    return c.json({ success: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
-    return res.status(500).json({ error: msg });
+    return c.json({ error: msg }, 500);
   }
 });
 

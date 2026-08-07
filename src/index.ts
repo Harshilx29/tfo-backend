@@ -1,113 +1,82 @@
-import dotenv from 'dotenv';
-dotenv.config();
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { secureHeaders } from 'hono/secure-headers';
+import { Env } from './lib/supabase';
+import { apiLimiter } from './middleware/rateLimit';
+import { AuthedContext } from './middleware/auth';
 
-// Global safety handlers to prevent crashes from network/DNS transient issues
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('⚠️ Unhandled Rejection at:', promise, 'reason:', reason);
-});
-process.on('uncaughtException', (err) => {
-  console.error('⚠️ Uncaught Exception:', err);
-});
-
-import express from 'express';
-import cors from 'cors';
-import cookieParser from 'cookie-parser';
-import helmet from 'helmet';
-import { createServer } from 'http';
-import { Server as SocketIOServer } from 'socket.io';
 import authRoutes from './routes/auth';
 import dashboardRoutes from './routes/dashboard';
+import companiesRoutes from './routes/companies';
 import trackRoutes from './routes/track';
 import usersRoutes from './routes/users';
 import tempLinksRoutes from './routes/tempLinks';
-import companiesRoutes from './routes/companies';
 import yarnsRoutes from './routes/yarns';
 import copColorsRoutes from './routes/copColors';
-import { initRealtime } from './ws/realtime';
-import { apiLimiter } from './middleware/rateLimit';
+import machinesRoutes from './routes/machines';
 
-const app    = express();
-// Trust proxy settings (required for rate limiting behind reverse proxies like Back4App / Cloudflare)
-app.set('trust proxy', 1);
-const server = createServer(app);
-const PORT   = process.env.PORT || 3001;
+export { RealtimeRoom } from './do/RealtimeRoom';
 
-// Support single URL or comma-separated list of allowed frontend origins
-const rawFrontendUrls = process.env.FRONTEND_URL || 'http://localhost:5173';
-const allowedOrigins  = rawFrontendUrls.includes(',')
-  ? rawFrontendUrls.split(',').map((u) => u.trim()).filter(Boolean)
-  : rawFrontendUrls.trim();
+type Vars = { userId?: string; profile?: any; tempAccess?: any };
+const app = new Hono<{ Bindings: Env; Variables: Vars }>();
 
-const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret-change-me';
-
-// ── Socket.IO server ────────────────────────────────────
-export const io = new SocketIOServer(server, {
-  cors: {
-    origin: allowedOrigins,
+// ── CORS — same allow-list logic as the old rawFrontendUrls handling ──
+app.use('*', async (c, next) => {
+  const raw = c.env.FRONTEND_URL || 'http://localhost:5173';
+  const allowed = raw.includes(',') ? raw.split(',').map((u) => u.trim()).filter(Boolean) : [raw.trim()];
+  return cors({
+    origin: allowed,
     credentials: true,
-  },
+  })(c, next);
 });
 
-// ── Security middleware ─────────────────────────────────
-// helmet sets safe HTTP headers (CSP, X-Frame-Options, HSTS, etc.)
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: 'cross-origin' }, // allow cross-origin API calls
-  contentSecurityPolicy: false, // API-only server; CSP not needed for JSON responses
-}));
-
-// Global rate limiter — 100 req/min per IP across all endpoints
-app.use(apiLimiter);
-
-// ── Express middleware ──────────────────────────────────
+// ── Security headers — replaces helmet ──
 app.use(
-  cors({
-    origin: allowedOrigins,
-    credentials: true,
+  '*',
+  secureHeaders({
+    crossOriginResourcePolicy: 'cross-origin',
+    // API-only, JSON responses — omit CSP entirely rather than passing `false`.
   })
 );
-app.use(express.json({ limit: '2mb' }));
-app.use(cookieParser(SESSION_SECRET));
 
-// ── Health check ────────────────────────────────────────
-app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+// ── Health check (exempt from rate limiting, same as before) ──
+app.get('/health', (c) => c.json({ status: 'ok' }));
+
+// ── Global rate limiter for everything else ──
+app.use('*', async (c, next) => {
+  if (c.req.path === '/health') return next();
+  return apiLimiter(c as AuthedContext, next);
+});
+
+// ── WebSocket upgrade — replaces the socket.io endpoint ──
+// One shared room instance (idFromName('global')) mirrors the old
+// single-process socket.io server; every client connects here and gets
+// filtered into rooms server-side, same as before.
+app.get('/realtime', async (c) => {
+  const id = c.env.REALTIME_ROOM.idFromName('global');
+  const stub = c.env.REALTIME_ROOM.get(id);
+  return stub.fetch(c.req.raw);
+});
 
 // ── Routes ──────────────────────────────────────────────
-app.use('/auth',       authRoutes);
-app.use('/dashboard',  dashboardRoutes);
-app.use('/track',      trackRoutes);
-app.use('/users',      usersRoutes);
-app.use('/temp-links', tempLinksRoutes);
-app.use('/companies',  companiesRoutes);
-app.use('/yarns',      yarnsRoutes);
-app.use('/cop-colors', copColorsRoutes);
+app.route('/auth', authRoutes);
+app.route('/dashboard', dashboardRoutes);
+app.route('/companies', companiesRoutes);
+app.route('/track', trackRoutes);
+app.route('/users', usersRoutes);
+app.route('/temp-links', tempLinksRoutes);
+app.route('/yarns', yarnsRoutes);
+app.route('/cop-colors', copColorsRoutes);
+app.route('/machines', machinesRoutes);
 
-// ── 404 catch-all ───────────────────────────────────────
-app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
+// ── 404 ──
+app.notFound((c) => c.json({ error: 'Not found' }, 404));
 
-// ── Error handler ───────────────────────────────────────
-// In production: never expose raw error messages (information leakage risk).
-// In development: full message shown for debugging.
-app.use(
-  (
-    err: Error,
-    _req: express.Request,
-    res: express.Response,
-    _next: express.NextFunction
-  ) => {
-    console.error(err);
-    const isProd = process.env.NODE_ENV === 'production';
-    res.status(500).json({
-      error: isProd ? 'Internal server error' : (err.message || 'Internal server error'),
-    });
-  }
-);
-
-// ── Realtime WebSocket bridge ────────────────────────────
-initRealtime(io);
-
-// ── Start ────────────────────────────────────────────────
-server.listen(PORT, () => {
-  console.log(`\n✅  Track Manager API   → Port ${PORT}`);
-  console.log(`   WebSocket (socket.io) → Port ${PORT}`);
-  console.log(`   CORS origins          → ${rawFrontendUrls}\n`);
+// ── Error handler ──
+app.onError((err, c) => {
+  console.error(err);
+  const isProd = c.env && (c as any).env?.NODE_ENV === 'production';
+  return c.json({ error: isProd ? 'Internal server error' : err.message || 'Internal server error' }, 500);
 });
+
+export default app;

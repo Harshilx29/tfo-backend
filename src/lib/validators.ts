@@ -33,7 +33,7 @@ export const windingBodySchema = z.object({
   lots:        z.number().int().optional(),
   bags:        z.number().int().optional(),
   remark:      z.string().max(1000).optional(),
-}).passthrough(); // allow extra fields Supabase may add (id, uid, created_at stripped upstream)
+}).passthrough();
 
 /**
  * TFO details body.
@@ -90,6 +90,33 @@ export const machineBodySchema = z.object({
   rows: z.array(machineRowSchema).max(500, 'Too many machine rows'),
 });
 
+// ── Machines registry ───────────────────────────────────────
+
+/**
+ * Machine create body — machine_number is required, rest optional.
+ */
+export const machineCreateSchema = z.object({
+  machine_number: z.number().int().positive('Machine number must be a positive integer'),
+  max_capacity:   z.number().int().positive().nullable().optional(),
+  vendor_name:    z.string().max(200).optional().nullable(),
+  vendor_phone:   z.string().max(50).optional().nullable(),
+  purchase_date:  z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'purchase_date must be YYYY-MM-DD').optional().nullable(),
+  enabled:        z.boolean().optional(),
+});
+
+/**
+ * Machine update body — all fields optional (partial edit).
+ * occupancy_status is intentionally NOT included — system-managed only.
+ */
+export const machineUpdateSchema = z.object({
+  machine_number: z.number().int().positive().optional(),
+  max_capacity:   z.number().int().positive().nullable().optional(),
+  vendor_name:    z.string().max(200).optional().nullable(),
+  vendor_phone:   z.string().max(50).optional().nullable(),
+  purchase_date:  z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'purchase_date must be YYYY-MM-DD').optional().nullable(),
+  enabled:        z.boolean().optional(),
+});
+
 // ── User management ───────────────────────────────────────
 
 export const userStatusBodySchema = z.object({
@@ -121,46 +148,20 @@ export const tempLinkCreateSchema = z.object({
     .optional(),
 });
 
-// ── Helper: validate and return 400 on error ─────────────
-
-import { Request, Response } from 'express';
+// ── Validation helper ──────────────────────────────────────
 
 /**
- * Parse and validate a Zod schema against `req.body`.
- * Returns the parsed data on success, or sends a 400 JSON response and returns null.
- *
- * Usage:
- *   const body = validateBody(req, res, mySchema);
- *   if (!body) return;
+ * Parse and validate a Zod schema against raw data.
+ * Returns { success: true, data: T } or { success: false, issues: string[] }.
  */
-export function validateBody<T>(
-  req: Request,
-  res: Response,
+export function validateData<T>(
+  data: unknown,
   schema: z.ZodType<T>
-): T | null {
-  const result = schema.safeParse(req.body);
+): { success: true; data: T } | { success: false; issues: string[] } {
+  const result = schema.safeParse(data);
   if (!result.success) {
     const issues = result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`);
-    res.status(400).json({ error: 'Validation failed', details: issues });
-    return null;
+    return { success: false, issues };
   }
-  return result.data;
-}
-
-/**
- * Parse and validate a Zod schema against `req.params`.
- * Returns the parsed data on success, or sends a 400 JSON response and returns null.
- */
-export function validateParams<T>(
-  req: Request,
-  res: Response,
-  schema: z.ZodType<T>
-): T | null {
-  const result = schema.safeParse(req.params);
-  if (!result.success) {
-    const issues = result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`);
-    res.status(400).json({ error: 'Invalid request parameters', details: issues });
-    return null;
-  }
-  return result.data;
+  return { success: true, data: result.data };
 }

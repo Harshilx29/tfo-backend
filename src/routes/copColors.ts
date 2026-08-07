@@ -1,17 +1,16 @@
-import { Router, Request, Response } from 'express';
-import { supabase } from '../lib/supabase';
+import { Hono } from 'hono';
+import { getSupabase, Env } from '../lib/supabase';
 import { requirePermission } from '../middleware/permission';
-import { verifyJWT } from '../middleware/auth';
+import { verifyJWT, AuthedContext } from '../middleware/auth';
 
-const router = Router();
-router.use(verifyJWT);
+type Vars = { userId?: string; profile?: any; tempAccess?: any };
+const router = new Hono<{ Bindings: Env; Variables: Vars }>();
+router.use('*', verifyJWT);
 
-// ==========================================
 // GET /cop-colors/dropdown
-// Lightweight endpoint for dropdown options (all authenticated users)
-// ==========================================
-router.get('/dropdown', async (req: Request, res: Response) => {
+router.get('/dropdown', async (c: AuthedContext) => {
   try {
+    const supabase = getSupabase(c.env);
     const { data, error } = await supabase
       .from('cop_colors')
       .select('id, name, hex_code')
@@ -20,22 +19,20 @@ router.get('/dropdown', async (req: Request, res: Response) => {
 
     if (error) {
       console.error('Error fetching cop colors dropdown:', error);
-      return res.status(500).json({ error: 'Failed to fetch cop colors' });
+      return c.json({ error: 'Failed to fetch cop colors' }, 500);
     }
 
-    res.json(data);
+    return c.json(data);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // GET /cop-colors
-// List all cop colors
-// ==========================================
-router.get('/', requirePermission('cop.view'), async (req: Request, res: Response) => {
+router.get('/', requirePermission('cop.view'), async (c: AuthedContext) => {
   try {
+    const supabase = getSupabase(c.env);
     const { data, error } = await supabase
       .from('cop_colors')
       .select('*')
@@ -43,23 +40,21 @@ router.get('/', requirePermission('cop.view'), async (req: Request, res: Respons
 
     if (error) {
       console.error('Error fetching cop colors:', error);
-      return res.status(500).json({ error: 'Failed to fetch cop colors' });
+      return c.json({ error: 'Failed to fetch cop colors' }, 500);
     }
 
-    res.json(data);
+    return c.json(data);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // GET /cop-colors/:id
-// Get single cop color by ID
-// ==========================================
-router.get('/:id', requirePermission('cop.view'), async (req: Request, res: Response) => {
+router.get('/:id', requirePermission('cop.view'), async (c: AuthedContext) => {
   try {
-    const { id } = req.params;
+    const id = c.req.param('id');
+    const supabase = getSupabase(c.env);
     const { data, error } = await supabase
       .from('cop_colors')
       .select('*')
@@ -67,30 +62,28 @@ router.get('/:id', requirePermission('cop.view'), async (req: Request, res: Resp
       .single();
 
     if (error) {
-      return res.status(404).json({ error: 'Cop color not found' });
+      return c.json({ error: 'Cop color not found' }, 404);
     }
 
-    res.json(data);
+    return c.json(data);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // POST /cop-colors
-// Create a new cop color
-// ==========================================
-router.post('/', requirePermission('cop.manage'), async (req: Request, res: Response) => {
+router.post('/', requirePermission('cop.manage'), async (c: AuthedContext) => {
   try {
-    const { name, hex_code, show_in_dropdown } = req.body;
+    const body = await c.req.json();
+    const { name, hex_code, show_in_dropdown } = body;
 
     if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Color name is required' });
+      return c.json({ error: 'Color name is required' }, 400);
     }
 
     if (!hex_code || !hex_code.trim()) {
-      return res.status(400).json({ error: 'Hex code is required' });
+      return c.json({ error: 'Hex code is required' }, 400);
     }
 
     let formattedHex = hex_code.trim();
@@ -98,6 +91,7 @@ router.post('/', requirePermission('cop.manage'), async (req: Request, res: Resp
       formattedHex = `#${formattedHex}`;
     }
 
+    const supabase = getSupabase(c.env);
     const { data, error } = await supabase
       .from('cop_colors')
       .insert({
@@ -110,31 +104,29 @@ router.post('/', requirePermission('cop.manage'), async (req: Request, res: Resp
 
     if (error) {
       console.error('Error creating cop color:', error);
-      return res.status(500).json({ error: 'Failed to create cop color' });
+      return c.json({ error: 'Failed to create cop color' }, 500);
     }
 
-    res.status(201).json(data);
+    return c.json(data, 201);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // PUT /cop-colors/:id
-// Update an existing cop color
-// ==========================================
-router.put('/:id', requirePermission('cop.manage'), async (req: Request, res: Response) => {
+router.put('/:id', requirePermission('cop.manage'), async (c: AuthedContext) => {
   try {
-    const { id } = req.params;
-    const { name, hex_code, show_in_dropdown } = req.body;
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const { name, hex_code, show_in_dropdown } = body;
 
     if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Color name is required' });
+      return c.json({ error: 'Color name is required' }, 400);
     }
 
     if (!hex_code || !hex_code.trim()) {
-      return res.status(400).json({ error: 'Hex code is required' });
+      return c.json({ error: 'Hex code is required' }, 400);
     }
 
     let formattedHex = hex_code.trim();
@@ -142,6 +134,7 @@ router.put('/:id', requirePermission('cop.manage'), async (req: Request, res: Re
       formattedHex = `#${formattedHex}`;
     }
 
+    const supabase = getSupabase(c.env);
     const { data, error } = await supabase
       .from('cop_colors')
       .update({
@@ -155,23 +148,21 @@ router.put('/:id', requirePermission('cop.manage'), async (req: Request, res: Re
 
     if (error) {
       console.error('Error updating cop color:', error);
-      return res.status(500).json({ error: 'Failed to update cop color' });
+      return c.json({ error: 'Failed to update cop color' }, 500);
     }
 
-    res.json(data);
+    return c.json(data);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // DELETE /cop-colors/:id
-// Delete a cop color
-// ==========================================
-router.delete('/:id', requirePermission('cop.manage'), async (req: Request, res: Response) => {
+router.delete('/:id', requirePermission('cop.manage'), async (c: AuthedContext) => {
   try {
-    const { id } = req.params;
+    const id = c.req.param('id');
+    const supabase = getSupabase(c.env);
     const { error } = await supabase
       .from('cop_colors')
       .delete()
@@ -179,13 +170,13 @@ router.delete('/:id', requirePermission('cop.manage'), async (req: Request, res:
 
     if (error) {
       console.error('Error deleting cop color:', error);
-      return res.status(500).json({ error: 'Failed to delete cop color' });
+      return c.json({ error: 'Failed to delete cop color' }, 500);
     }
 
-    res.json({ success: true });
+    return c.json({ success: true });
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 

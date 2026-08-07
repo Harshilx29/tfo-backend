@@ -1,14 +1,6 @@
-# Environment variables (CRITICAL)
+node_modules
+.dev.vars
+.wrangler
+dist
 .env
-.env.*
-*.env
-
-# Dependencies
-node_modules/
-
-# Production build output
-dist/
-
-# Logs and scratch files
-*.log
 error_log.txt

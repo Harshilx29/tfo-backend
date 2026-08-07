@@ -1,43 +1,41 @@
-import rateLimit from 'express-rate-limit';
+import { Next } from 'hono';
+import { AuthedContext } from './auth';
 
 /**
- * Global API rate limiter.
- * Applies to ALL routes — 100 requests per minute per IP.
- * Prevents brute-force, DDoS, and scraping.
+ * express-rate-limit kept counts in a process-local Map, which relied on
+ * every request hitting the same long-lived Node process. Workers has no
+ * such guarantee — different requests can land on different isolates —
+ * so counting has to live in a globally consistent service instead.
+ * Cloudflare's Rate Limiting binding (declared in wrangler.toml) does
+ * that natively at the edge, so this file is a genuine redesign, not a
+ * port: same external behavior (429s past a threshold), different
+ * mechanism.
  */
-export const apiLimiter = rateLimit({
-  windowMs: 60 * 1000,       // 1 minute window
-  max: 100,                   // limit each IP to 100 requests per window
-  standardHeaders: true,      // Return rate limit info in RateLimit-* headers
-  legacyHeaders: false,       // Disable the X-RateLimit-* headers
-  message: { error: 'Too many requests — please slow down and try again.' },
-  skip: (req) => {
-    // Skip health-check endpoint from rate limiting
-    return req.path === '/health';
-  },
-});
+function clientKey(c: AuthedContext): string {
+  // CF-Connecting-IP is the real client IP at the edge (equivalent to
+  // trusting X-Forwarded-For with `app.set('trust proxy', 1)` before).
+  return c.req.header('CF-Connecting-IP') || 'unknown';
+}
 
-/**
- * Strict auth limiter — applies to OAuth login endpoints only.
- * 10 attempts per minute per IP to prevent login abuse.
- */
-export const authLimiter = rateLimit({
-  windowMs: 60 * 1000,       // 1 minute window
-  max: 10,                    // Only 10 login attempts per minute
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many login attempts — please wait a minute and try again.' },
-});
+async function limit(
+  c: AuthedContext,
+  next: Next,
+  limiter: { limit: (opts: { key: string }) => Promise<{ success: boolean }> },
+  message: string
+): Promise<Response | void> {
+  const { success } = await limiter.limit({ key: clientKey(c) });
+  if (!success) return c.json({ error: message }, 429);
+  await next();
+}
 
-/**
- * Strict temp-link validation limiter.
- * Prevents token enumeration/brute-force attacks on public validate endpoint.
- * 20 attempts per 5 minutes per IP.
- */
-export const tempLinkLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000,   // 5 minute window
-  max: 20,                    // 20 validation attempts per window
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many link validation attempts — please wait and try again.' },
-});
+/** Global limiter — 100 req/min per IP. Skip /health in the route setup. */
+export const apiLimiter = (c: AuthedContext, next: Next) =>
+  limit(c, next, c.env.API_RATE_LIMITER, 'Too many requests — please slow down and try again.');
+
+/** Auth limiter — 10 attempts per minute per IP. */
+export const authLimiter = (c: AuthedContext, next: Next) =>
+  limit(c, next, c.env.AUTH_RATE_LIMITER, 'Too many login attempts — please wait a minute and try again.');
+
+/** Temp-link validation limiter — 20 attempts per 5 minutes per IP. */
+export const tempLinkLimiter = (c: AuthedContext, next: Next) =>
+  limit(c, next, c.env.TEMP_LINK_RATE_LIMITER, 'Too many link validation attempts — please wait and try again.');

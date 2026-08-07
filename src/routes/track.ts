@@ -1,10 +1,6 @@
-import { Router } from 'express';
-import { supabase } from '../lib/supabase';
-import {
-  verifyJWT,
-  verifyJWTOrTemp,
-  AuthenticatedRequest,
-} from '../middleware/auth';
+import { Hono } from 'hono';
+import { getSupabase, Env } from '../lib/supabase';
+import { verifyJWT, verifyJWTOrTemp, AuthedContext } from '../middleware/auth';
 import { requirePermission, requireReadAccess } from '../middleware/permission';
 import {
   uidSchema,
@@ -13,14 +9,15 @@ import {
   boilerBodySchema,
   warpingBodySchema,
   machineBodySchema,
-  validateBody,
-  validateParams,
+  validateData,
 } from '../lib/validators';
 
-const router = Router();
+type Vars = { userId?: string; profile?: any; tempAccess?: any };
+const router = new Hono<{ Bindings: Env; Variables: Vars }>();
 
 // ── Helper: ensure main row exists for this uid ─────────
-async function ensureMainExists(uid: string): Promise<void> {
+async function ensureMainExists(c: AuthedContext, uid: string): Promise<void> {
+  const supabase = getSupabase(c.env);
   const { data: existing } = await supabase
     .from('main')
     .select('uid')
@@ -42,11 +39,11 @@ router.get(
   '/search',
   verifyJWTOrTemp,
   requireReadAccess('track', 'track.view'),
-  async (req: AuthenticatedRequest, res) => {
-    // Sanitize search query: strip to safe chars only, limit length
-    const raw = ((req.query.q as string) || '').trim();
+  async (c: AuthedContext) => {
+    const raw = (c.req.query('q') || '').trim();
     const q = raw.replace(/[^\w\-\s]/g, '').substring(0, 100);
     try {
+      const supabase = getSupabase(c.env);
       let query = supabase
         .from('main')
         .select('uid, file_number, created_at')
@@ -59,10 +56,10 @@ router.get(
 
       const { data, error } = await query;
       if (error) throw error;
-      return res.json(data ?? []);
+      return c.json(data ?? []);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      return res.status(500).json({ error: msg });
+      return c.json({ error: msg }, 500);
     }
   }
 );
@@ -73,8 +70,9 @@ router.get(
   '/open-batches',
   verifyJWTOrTemp,
   requireReadAccess('track', 'track.view'),
-  async (req: AuthenticatedRequest, res) => {
+  async (c: AuthedContext) => {
     try {
+      const supabase = getSupabase(c.env);
       const { data, error } = await supabase
         .from('main')
         .select(`
@@ -87,10 +85,10 @@ router.get(
         .order('created_at', { ascending: false });
 
       if (error) throw error;
-      return res.json(data ?? []);
+      return c.json(data ?? []);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      return res.status(500).json({ error: msg });
+      return c.json({ error: msg }, 500);
     }
   }
 );
@@ -101,14 +99,17 @@ router.get(
   '/:uid',
   verifyJWTOrTemp,
   requireReadAccess('track', 'track.view'),
-  async (req: AuthenticatedRequest, res) => {
-    const uidParsed = uidSchema.safeParse(req.params.uid);
+  async (c: AuthedContext) => {
+    const uidParam = c.req.param('uid');
+    const uidParsed = uidSchema.safeParse(uidParam);
     if (!uidParsed.success) {
-      return res.status(400).json({ error: 'Invalid UID', details: uidParsed.error.issues.map(i => i.message) });
+      return c.json({ error: 'Invalid UID', details: uidParsed.error.issues.map(i => i.message) }, 400);
     }
     const uid = uidParsed.data;
-    if (!uid) return;
+    if (!uid) return c.json({ error: 'Invalid UID' }, 400);
+
     try {
+      const supabase = getSupabase(c.env);
       const [
         { data: main },
         { data: winding },
@@ -129,7 +130,7 @@ router.get(
           .order('sr_no', { ascending: true }),
       ]);
 
-      return res.json({
+      return c.json({
         main,
         winding,
         tfo,
@@ -139,7 +140,7 @@ router.get(
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      return res.status(500).json({ error: msg });
+      return c.json({ error: msg }, 500);
     }
   }
 );
@@ -149,18 +150,27 @@ router.put(
   '/:uid/winding',
   verifyJWT,
   requirePermission('track.winding.save'),
-  async (req: AuthenticatedRequest, res) => {
-    const uidParsed = uidSchema.safeParse(req.params.uid);
+  async (c: AuthedContext) => {
+    const uidParam = c.req.param('uid');
+    const uidParsed = uidSchema.safeParse(uidParam);
     if (!uidParsed.success) {
-      return res.status(400).json({ error: 'Invalid UID', details: uidParsed.error.issues.map(i => i.message) });
+      return c.json({ error: 'Invalid UID', details: uidParsed.error.issues.map(i => i.message) }, 400);
     }
     const uid = uidParsed.data;
-    const body = validateBody(req, res, windingBodySchema);
-    if (!body) return;
-    try {
-      await ensureMainExists(uid);
+    if (!uid) return c.json({ error: 'Invalid UID' }, 400);
 
-      const { id: _id, created_at: _ca, uid: _uid, ...rest } = body as any;
+    try {
+      const body = await c.req.json();
+      const parsed = validateData(body, windingBodySchema);
+      if (!parsed.success) {
+        return c.json({ error: 'Validation failed', details: parsed.issues }, 400);
+      }
+      const validatedBody = parsed.data;
+
+      const supabase = getSupabase(c.env);
+      await ensureMainExists(c, uid);
+
+      const { id: _id, created_at: _ca, uid: _uid, ...rest } = validatedBody as any;
 
       // Validate Company if provided
       let validatedCompanyId: string | null = rest.company_id || null;
@@ -188,7 +198,7 @@ router.put(
         }
 
         if (!compRecord) {
-          return res.status(400).json({ error: 'No matching company found — please select from the list or add it in the Company page' });
+          return c.json({ error: 'No matching company found — please select from the list or add it in the Company page' }, 400);
         }
 
         validatedCompanyId = compRecord.id;
@@ -221,7 +231,7 @@ router.put(
         }
 
         if (!yarnRecord) {
-          return res.status(400).json({ error: 'No matching yarn found — please select from the list or add it in the Yarn page' });
+          return c.json({ error: 'No matching yarn found — please select from the list or add it in the Yarn page' }, 400);
         }
 
         validatedYarnId = yarnRecord.id;
@@ -245,10 +255,10 @@ router.put(
         .single();
 
       if (error) throw error;
-      return res.json(data);
+      return c.json(data);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      return res.status(500).json({ error: msg });
+      return c.json({ error: msg }, 500);
     }
   }
 );
@@ -258,18 +268,101 @@ router.put(
   '/:uid/tfo',
   verifyJWT,
   requirePermission('track.tfo.save'),
-  async (req: AuthenticatedRequest, res) => {
-    const uidParsed = uidSchema.safeParse(req.params.uid);
+  async (c: AuthedContext) => {
+    const uidParam = c.req.param('uid');
+    const uidParsed = uidSchema.safeParse(uidParam);
     if (!uidParsed.success) {
-      return res.status(400).json({ error: 'Invalid UID', details: uidParsed.error.issues.map(i => i.message) });
+      return c.json({ error: 'Invalid UID', details: uidParsed.error.issues.map(i => i.message) }, 400);
     }
     const uid = uidParsed.data;
-    const body = validateBody(req, res, tfoBodySchema);
-    if (!body) return;
-    try {
-      await ensureMainExists(uid);
+    if (!uid) return c.json({ error: 'Invalid UID' }, 400);
 
-      const { id: _id, created_at: _ca, uid: _uid, ...rest } = body as any;
+    try {
+      const body = await c.req.json();
+      const parsed = validateData(body, tfoBodySchema);
+      if (!parsed.success) {
+        return c.json({ error: 'Validation failed', details: parsed.issues }, 400);
+      }
+      const validatedBody = parsed.data;
+
+      const supabase = getSupabase(c.env);
+      await ensureMainExists(c, uid);
+
+      const { id: _id, created_at: _ca, uid: _uid, ...rest } = validatedBody as any;
+
+      // ── Machine occupancy logic ────────────────────────────
+      const incomingMachineNo: number | null = rest.tfo_no ?? null;
+      const incomingLoadDate: string | null  = rest.loading_date   ?? null;
+      const incomingUnloadDate: string | null = rest.unloading_date ?? null;
+
+      if (incomingMachineNo !== null) {
+        // Fetch the machine record
+        const { data: machine, error: machineErr } = await supabase
+          .from('machines')
+          .select('id, occupancy_status, enabled')
+          .eq('machine_number', incomingMachineNo)
+          .single();
+
+        if (machineErr || !machine) {
+          return c.json({
+            error: `Machine ${incomingMachineNo} not found in the registry. Please add it via the Machine Management page.`,
+          }, 400);
+        }
+
+        // ── LOAD: loading_date is being set ───────────────────
+        if (incomingLoadDate) {
+          if (machine.occupancy_status === 'loaded') {
+            // Check if THIS batch already owns the machine (idempotent re-save allowed)
+            const { data: existingTfo } = await supabase
+              .from('tfo_details')
+              .select('machine_id')
+              .eq('uid', uid)
+              .maybeSingle();
+
+            const alreadyOwned = existingTfo?.machine_id === machine.id;
+
+            if (!alreadyOwned) {
+              return c.json({
+                error: `Machine ${incomingMachineNo} is currently in use and cannot be loaded again until unloaded.`,
+              }, 409);
+            }
+          }
+
+          // Set machine to loaded and store FK
+          await supabase
+            .from('machines')
+            .update({ occupancy_status: 'loaded' })
+            .eq('id', machine.id);
+
+          rest.machine_id = machine.id;
+        }
+
+        // ── UNLOAD: unloading_date is being set ───────────────
+        if (incomingUnloadDate) {
+          // Free the machine — it's been unloaded
+          await supabase
+            .from('machines')
+            .update({ occupancy_status: 'free' })
+            .eq('id', machine.id);
+        }
+      } else if (incomingUnloadDate) {
+        // tfo_no not sent in this save but unloading_date provided —
+        // look up existing machine_id for this uid to free the machine
+        const { data: existingTfo } = await supabase
+          .from('tfo_details')
+          .select('machine_id')
+          .eq('uid', uid)
+          .maybeSingle();
+
+        if (existingTfo?.machine_id) {
+          await supabase
+            .from('machines')
+            .update({ occupancy_status: 'free' })
+            .eq('id', existingTfo.machine_id);
+        }
+      }
+      // ──────────────────────────────────────────────────────────
+
       const { data, error } = await supabase
         .from('tfo_details')
         .upsert({ uid, ...rest }, { onConflict: 'uid' })
@@ -277,10 +370,10 @@ router.put(
         .single();
 
       if (error) throw error;
-      return res.json(data);
+      return c.json(data);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      return res.status(500).json({ error: msg });
+      return c.json({ error: msg }, 500);
     }
   }
 );
@@ -290,18 +383,43 @@ router.put(
   '/:uid/boiler',
   verifyJWT,
   requirePermission('track.boiler.save'),
-  async (req: AuthenticatedRequest, res) => {
-    const uidParsed = uidSchema.safeParse(req.params.uid);
+  async (c: AuthedContext) => {
+    const uidParam = c.req.param('uid');
+    const uidParsed = uidSchema.safeParse(uidParam);
     if (!uidParsed.success) {
-      return res.status(400).json({ error: 'Invalid UID', details: uidParsed.error.issues.map(i => i.message) });
+      return c.json({ error: 'Invalid UID', details: uidParsed.error.issues.map(i => i.message) }, 400);
     }
     const uid = uidParsed.data;
-    const body = validateBody(req, res, boilerBodySchema);
-    if (!body) return;
-    try {
-      await ensureMainExists(uid);
+    if (!uid) return c.json({ error: 'Invalid UID' }, 400);
 
-      const { id: _id, created_at: _ca, uid: _uid, ...rest } = body as any;
+    try {
+      const body = await c.req.json();
+      const parsed = validateData(body, boilerBodySchema);
+      if (!parsed.success) {
+        return c.json({ error: 'Validation failed', details: parsed.issues }, 400);
+      }
+      const validatedBody = parsed.data;
+
+      const supabase = getSupabase(c.env);
+      await ensureMainExists(c, uid);
+
+      const { id: _id, created_at: _ca, uid: _uid, ...rest } = validatedBody as any;
+
+      // ── Merge separate date + time → "date and time" column ─
+      if ('date' in rest || 'time' in rest) {
+        const dateStr = (rest.date as string | null) || null;
+        const timeStr = (rest.time as string | null) || '00:00';
+
+        if (dateStr) {
+          rest['date and time'] = new Date(`${dateStr}T${timeStr}`).toISOString();
+        } else {
+          rest['date and time'] = null;
+        }
+        delete rest.date;
+        delete rest.time;
+      }
+      // ─────────────────────────────────────────────────────────
+
       const { data, error } = await supabase
         .from('boiler_details')
         .upsert({ uid, ...rest }, { onConflict: 'uid' })
@@ -309,10 +427,10 @@ router.put(
         .single();
 
       if (error) throw error;
-      return res.json(data);
+      return c.json(data);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      return res.status(500).json({ error: msg });
+      return c.json({ error: msg }, 500);
     }
   }
 );
@@ -322,18 +440,27 @@ router.put(
   '/:uid/warping',
   verifyJWT,
   requirePermission('track.warping.save'),
-  async (req: AuthenticatedRequest, res) => {
-    const uidParsed = uidSchema.safeParse(req.params.uid);
+  async (c: AuthedContext) => {
+    const uidParam = c.req.param('uid');
+    const uidParsed = uidSchema.safeParse(uidParam);
     if (!uidParsed.success) {
-      return res.status(400).json({ error: 'Invalid UID', details: uidParsed.error.issues.map(i => i.message) });
+      return c.json({ error: 'Invalid UID', details: uidParsed.error.issues.map(i => i.message) }, 400);
     }
     const uid = uidParsed.data;
-    const body = validateBody(req, res, warpingBodySchema);
-    if (!body) return;
-    try {
-      await ensureMainExists(uid);
+    if (!uid) return c.json({ error: 'Invalid UID' }, 400);
 
-      const { id: _id, created_at: _ca, uid: _uid, ...rest } = body as any;
+    try {
+      const body = await c.req.json();
+      const parsed = validateData(body, warpingBodySchema);
+      if (!parsed.success) {
+        return c.json({ error: 'Validation failed', details: parsed.issues }, 400);
+      }
+      const validatedBody = parsed.data;
+
+      const supabase = getSupabase(c.env);
+      await ensureMainExists(c, uid);
+
+      const { id: _id, created_at: _ca, uid: _uid, ...rest } = validatedBody as any;
       const { data, error } = await supabase
         .from('warping')
         .upsert({ uid, ...rest }, { onConflict: 'uid' })
@@ -341,32 +468,38 @@ router.put(
         .single();
 
       if (error) throw error;
-      return res.json(data);
+      return c.json(data);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      return res.status(500).json({ error: msg });
+      return c.json({ error: msg }, 500);
     }
   }
 );
 
 // ── PUT /track/:uid/machine ──────────────────────────────
-// Atomic replace via SECURITY DEFINER Postgres function.
 router.put(
   '/:uid/machine',
   verifyJWT,
   requirePermission('track.machine.save'),
-  async (req: AuthenticatedRequest, res) => {
-    const uidParsed = uidSchema.safeParse(req.params.uid);
+  async (c: AuthedContext) => {
+    const uidParam = c.req.param('uid');
+    const uidParsed = uidSchema.safeParse(uidParam);
     if (!uidParsed.success) {
-      return res.status(400).json({ error: 'Invalid UID', details: uidParsed.error.issues.map(i => i.message) });
+      return c.json({ error: 'Invalid UID', details: uidParsed.error.issues.map(i => i.message) }, 400);
     }
     const uid = uidParsed.data;
-    const body = validateBody(req, res, machineBodySchema);
-    if (!body) return;
-    const rows = body.rows;
+    if (!uid) return c.json({ error: 'Invalid UID' }, 400);
 
     try {
-      await ensureMainExists(uid);
+      const body = await c.req.json();
+      const parsed = validateData(body, machineBodySchema);
+      if (!parsed.success) {
+        return c.json({ error: 'Validation failed', details: parsed.issues }, 400);
+      }
+      const { rows } = parsed.data;
+
+      const supabase = getSupabase(c.env);
+      await ensureMainExists(c, uid);
 
       const cleanRows = rows.map((r, idx) => ({
         sr_no: r.sr_no ?? idx + 1,
@@ -382,10 +515,10 @@ router.put(
       });
 
       if (error) throw error;
-      return res.json(data ?? []);
+      return c.json(data ?? []);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      return res.status(500).json({ error: msg });
+      return c.json({ error: msg }, 500);
     }
   }
 );
@@ -395,24 +528,25 @@ router.delete(
   '/:uid/machine/:rowId',
   verifyJWT,
   requirePermission('track.machine.delete_row'),
-  async (_req: AuthenticatedRequest, res) => {
-    const { rowId } = _req.params;
-    // Validate rowId is a safe integer to prevent injection via parseInt
-    const rowIdNum = parseInt(rowId, 10);
+  async (c: AuthedContext) => {
+    const rowId = c.req.param('rowId');
+    const rowIdNum = parseInt(rowId || '', 10);
     if (isNaN(rowIdNum) || rowIdNum <= 0) {
-      return res.status(400).json({ error: 'Invalid row ID' });
+      return c.json({ error: 'Invalid row ID' }, 400);
     }
+
     try {
+      const supabase = getSupabase(c.env);
       const { error } = await supabase
         .from('machine_log')
         .delete()
         .eq('id', rowIdNum);
 
       if (error) throw error;
-      return res.json({ success: true });
+      return c.json({ success: true });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
-      return res.status(500).json({ error: msg });
+      return c.json({ error: msg }, 500);
     }
   }
 );

@@ -1,17 +1,16 @@
-import { Router, Request, Response } from 'express';
-import { supabase } from '../lib/supabase';
+import { Hono } from 'hono';
+import { getSupabase, Env } from '../lib/supabase';
 import { requirePermission } from '../middleware/permission';
-import { verifyJWT } from '../middleware/auth';
+import { verifyJWT, AuthedContext } from '../middleware/auth';
 
-const router = Router();
-router.use(verifyJWT);
+type Vars = { userId?: string; profile?: any; tempAccess?: any };
+const router = new Hono<{ Bindings: Env; Variables: Vars }>();
+router.use('*', verifyJWT);
 
-// ==========================================
 // GET /yarns
-// List all yarns
-// ==========================================
-router.get('/', requirePermission('yarn.view'), async (req: Request, res: Response) => {
+router.get('/', requirePermission('yarn.view'), async (c: AuthedContext) => {
   try {
+    const supabase = getSupabase(c.env);
     const { data, error } = await supabase
       .from('yarns')
       .select('*')
@@ -19,22 +18,20 @@ router.get('/', requirePermission('yarn.view'), async (req: Request, res: Respon
 
     if (error) {
       console.error('Error fetching yarns:', error);
-      return res.status(500).json({ error: 'Failed to fetch yarns' });
+      return c.json({ error: 'Failed to fetch yarns' }, 500);
     }
 
-    res.json(data);
+    return c.json(data);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // GET /yarns/dropdown
-// Lightweight endpoint for dropdown options (all authenticated users)
-// ==========================================
-router.get('/dropdown', async (req: Request, res: Response) => {
+router.get('/dropdown', async (c: AuthedContext) => {
   try {
+    const supabase = getSupabase(c.env);
     const { data, error } = await supabase
       .from('yarns')
       .select('id, whole_name')
@@ -43,23 +40,21 @@ router.get('/dropdown', async (req: Request, res: Response) => {
 
     if (error) {
       console.error('Error fetching yarn dropdown:', error);
-      return res.status(500).json({ error: 'Failed to fetch yarns' });
+      return c.json({ error: 'Failed to fetch yarns' }, 500);
     }
 
-    res.json(data);
+    return c.json(data);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // GET /yarns/:id
-// Get a single yarn by ID
-// ==========================================
-router.get('/:id', requirePermission('yarn.view'), async (req: Request, res: Response) => {
+router.get('/:id', requirePermission('yarn.view'), async (c: AuthedContext) => {
   try {
-    const { id } = req.params;
+    const id = c.req.param('id');
+    const supabase = getSupabase(c.env);
     const { data, error } = await supabase
       .from('yarns')
       .select('*')
@@ -67,23 +62,21 @@ router.get('/:id', requirePermission('yarn.view'), async (req: Request, res: Res
       .single();
 
     if (error) {
-      return res.status(404).json({ error: 'Yarn not found' });
+      return c.json({ error: 'Yarn not found' }, 404);
     }
 
-    res.json(data);
+    return c.json(data);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // GET /yarns/:id/batches
-// Get associated batches for a yarn
-// ==========================================
-router.get('/:id/batches', requirePermission('yarn.view'), async (req: Request, res: Response) => {
+router.get('/:id/batches', requirePermission('yarn.view'), async (c: AuthedContext) => {
   try {
-    const { id } = req.params;
+    const id = c.req.param('id');
+    const supabase = getSupabase(c.env);
 
     // First get the yarn to know its whole_name
     const { data: yarn, error: yarnError } = await supabase
@@ -93,12 +86,10 @@ router.get('/:id/batches', requirePermission('yarn.view'), async (req: Request, 
       .single();
 
     if (yarnError || !yarn) {
-      return res.status(404).json({ error: 'Yarn not found' });
+      return c.json({ error: 'Yarn not found' }, 404);
     }
 
     // Query winding_details matching the name or yarn_id
-    // Historical data only has the yarn_type string,
-    // new data will have the yarn_id.
     const { data: batches, error: batchesError } = await supabase
       .from('winding_details')
       .select('uid, date, company, lot_number')
@@ -107,41 +98,40 @@ router.get('/:id/batches', requirePermission('yarn.view'), async (req: Request, 
 
     if (batchesError) {
       console.error('Error fetching associated batches:', batchesError);
-      return res.status(500).json({ error: 'Failed to fetch batches' });
+      return c.json({ error: 'Failed to fetch batches' }, 500);
     }
 
-    res.json(batches);
+    return c.json(batches);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // POST /yarns
-// Create a new yarn
-// ==========================================
-router.post('/', requirePermission('yarn.manage'), async (req: Request, res: Response) => {
+router.post('/', requirePermission('yarn.manage'), async (c: AuthedContext) => {
   try {
-    const { denier, filament, colour, type, show_in_dropdown } = req.body;
+    const body = await c.req.json();
+    const { denier, filament, colour, type, show_in_dropdown } = body;
 
     if (!denier || !filament || !type) {
-      return res.status(400).json({ error: 'Denier, filament, and type are required' });
+      return c.json({ error: 'Denier, filament, and type are required' }, 400);
     }
 
     const validTypes = ['Nylon', 'Cat', 'Poly'];
     if (!validTypes.includes(type)) {
-      return res.status(400).json({ error: `Type must be one of: ${validTypes.join(', ')}` });
+      return c.json({ error: `Type must be one of: ${validTypes.join(', ')}` }, 400);
     }
 
     if (typeof denier !== 'number' || denier <= 0) {
-      return res.status(400).json({ error: 'Denier must be a positive number' });
+      return c.json({ error: 'Denier must be a positive number' }, 400);
     }
 
     if (typeof filament !== 'number' || filament <= 0) {
-      return res.status(400).json({ error: 'Filament must be a positive number' });
+      return c.json({ error: 'Filament must be a positive number' }, 400);
     }
 
+    const supabase = getSupabase(c.env);
     const { data, error } = await supabase
       .from('yarns')
       .insert({
@@ -156,34 +146,33 @@ router.post('/', requirePermission('yarn.manage'), async (req: Request, res: Res
 
     if (error) {
       console.error('Error creating yarn:', error);
-      return res.status(500).json({ error: 'Failed to create yarn' });
+      return c.json({ error: 'Failed to create yarn' }, 500);
     }
 
-    res.status(201).json(data);
+    return c.json(data, 201);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // PUT /yarns/:id
-// Update an existing yarn
-// ==========================================
-router.put('/:id', requirePermission('yarn.manage'), async (req: Request, res: Response) => {
+router.put('/:id', requirePermission('yarn.manage'), async (c: AuthedContext) => {
   try {
-    const { id } = req.params;
-    const { denier, filament, colour, type, show_in_dropdown } = req.body;
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const { denier, filament, colour, type, show_in_dropdown } = body;
 
     if (!denier || !filament || !type) {
-      return res.status(400).json({ error: 'Denier, filament, and type are required' });
+      return c.json({ error: 'Denier, filament, and type are required' }, 400);
     }
 
     const validTypes = ['Nylon', 'Cat', 'Poly'];
     if (!validTypes.includes(type)) {
-      return res.status(400).json({ error: `Type must be one of: ${validTypes.join(', ')}` });
+      return c.json({ error: `Type must be one of: ${validTypes.join(', ')}` }, 400);
     }
 
+    const supabase = getSupabase(c.env);
     const { data, error } = await supabase
       .from('yarns')
       .update({
@@ -199,13 +188,13 @@ router.put('/:id', requirePermission('yarn.manage'), async (req: Request, res: R
 
     if (error) {
       console.error('Error updating yarn:', error);
-      return res.status(500).json({ error: 'Failed to update yarn' });
+      return c.json({ error: 'Failed to update yarn' }, 500);
     }
 
-    res.json(data);
+    return c.json(data);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 

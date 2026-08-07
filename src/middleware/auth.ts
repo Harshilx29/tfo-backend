@@ -1,9 +1,11 @@
-import { supabase, supabaseAuth } from '../lib/supabase';
+import { Context, Next } from 'hono';
+import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import * as cookie from 'cookie';
+// nodejs_compat (enabled in wrangler.toml) polyfills node:crypto, so
+// cookie-signature works unmodified — same signing scheme as Express's
+// cookie-parser, so existing signed cookies from the old backend keep working.
 import * as cookieSig from 'cookie-signature';
-import dotenv from 'dotenv';
-import { Request, Response, NextFunction } from 'express';
-dotenv.config();
+import { getSupabase, getSupabaseAuth, Env } from '../lib/supabase';
 
 export interface Profile {
   id: string;
@@ -20,58 +22,55 @@ export interface TempAccess {
   allowed_pages: string[];
 }
 
-export interface AuthenticatedRequest extends Request {
+// Hono stores per-request values on c.set/c.get instead of mutating req.
+// These keys mirror the old req.userId / req.profile / req.tempAccess.
+type Vars = {
   userId?: string;
   profile?: Profile;
   tempAccess?: TempAccess;
-}
-
-const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret-change-me';
-const SUPABASE_URL   = process.env.SUPABASE_URL || '';
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
+};
+export type AuthedContext = Context<{ Bindings: Env; Variables: Vars }>;
 
 // ── Cookie helpers ───────────────────────────────────────
 
-/** Read and unsign the tm_access cookie from signed cookies or raw header */
-function extractToken(req: AuthenticatedRequest): string | null {
-  // cookie-parser already populates req.signedCookies when cookieParser(secret) is used
-  const fromSigned = req.signedCookies?.tm_access;
-  if (fromSigned) return fromSigned;
-  return null;
+function unsign(signed: string, secret: string): string | null {
+  if (!signed?.startsWith('s:')) return null;
+  const result = cookieSig.unsign(signed.slice(2), secret);
+  return result || null;
 }
 
-function extractRefreshToken(req: AuthenticatedRequest): string | null {
-  return req.signedCookies?.tm_refresh ?? null;
+export function extractToken(c: AuthedContext): string | null {
+  const raw = getCookie(c, 'tm_access');
+  if (!raw) return null;
+  return unsign(raw, c.env.SESSION_SECRET);
 }
 
-export function setSessionCookies(
-  res: Response,
-  access_token: string,
-  refresh_token: string
-): void {
-  const opts = {
-    httpOnly: true,
-    signed: true,
-    sameSite: 'none' as const,
-    secure: true,
-  };
-  res.cookie('tm_access',  access_token,  { ...opts, maxAge: 60 * 60 * 1000 });         // 1h
-  res.cookie('tm_refresh', refresh_token, { ...opts, maxAge: 30 * 24 * 60 * 60 * 1000 }); // 30d
+function extractRefreshToken(c: AuthedContext): string | null {
+  const raw = getCookie(c, 'tm_refresh');
+  if (!raw) return null;
+  return unsign(raw, c.env.SESSION_SECRET);
 }
 
-export function clearSessionCookies(res: Response): void {
-  res.clearCookie('tm_access');
-  res.clearCookie('tm_refresh');
+export function setSessionCookies(c: AuthedContext, access_token: string, refresh_token: string): void {
+  const sign = (val: string) => 's:' + cookieSig.sign(val, c.env.SESSION_SECRET);
+  const base = { httpOnly: true, sameSite: 'None' as const, secure: true, path: '/' };
+  setCookie(c, 'tm_access', sign(access_token), { ...base, maxAge: 60 * 60 });
+  setCookie(c, 'tm_refresh', sign(refresh_token), { ...base, maxAge: 30 * 24 * 60 * 60 });
 }
 
-/** Parse and unsign tm_access from a raw Cookie header string (for socket.io middleware) */
-export function unsignTokenFromCookieHeader(cookieHeader: string): string | null {
+export function clearSessionCookies(c: AuthedContext): void {
+  deleteCookie(c, 'tm_access', { path: '/' });
+  deleteCookie(c, 'tm_refresh', { path: '/' });
+}
+
+/** Parse + unsign tm_access from a raw Cookie header — used by the
+ * Durable Object realtime layer, same job as the old socket.io auth. */
+export function unsignTokenFromCookieHeader(cookieHeader: string, secret: string): string | null {
   try {
     const parsed = cookie.parse(cookieHeader);
     const raw = parsed['tm_access'];
-    if (!raw?.startsWith('s:')) return null;
-    const result = cookieSig.unsign(raw.slice(2), SESSION_SECRET);
-    return result || null;
+    if (!raw) return null;
+    return unsign(raw, secret);
   } catch {
     return null;
   }
@@ -79,19 +78,17 @@ export function unsignTokenFromCookieHeader(cookieHeader: string): string | null
 
 // ── Attempt token refresh ────────────────────────────────
 
-async function tryRefresh(
-  req: AuthenticatedRequest,
-  res: Response
-): Promise<{ access_token: string; user_id: string } | null> {
-  const refreshToken = extractRefreshToken(req);
+async function tryRefresh(c: AuthedContext): Promise<{ access_token: string; user_id: string } | null> {
+  const refreshToken = extractRefreshToken(c);
   if (!refreshToken) return null;
 
   try {
+    const supabaseAuth = getSupabaseAuth(c.env);
     const { data, error } = await supabaseAuth.auth.refreshSession({ refresh_token: refreshToken });
     if (error || !data.session) return null;
 
     const { access_token, refresh_token } = data.session;
-    setSessionCookies(res, access_token, refresh_token);
+    setSessionCookies(c, access_token, refresh_token);
     return { access_token, user_id: data.session.user.id };
   } catch {
     return null;
@@ -100,91 +97,65 @@ async function tryRefresh(
 
 // ── Main auth middleware ─────────────────────────────────
 
-export async function verifyJWT(
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  let token = extractToken(req);
+export async function verifyJWT(c: AuthedContext, next: Next): Promise<Response | void> {
+  let token = extractToken(c);
 
-  // Try refresh if no access cookie
   if (!token) {
-    const refreshed = await tryRefresh(req, res);
-    if (!refreshed) {
-      res.status(401).json({ error: 'Not authenticated — please sign in' });
-      return;
-    }
+    const refreshed = await tryRefresh(c);
+    if (!refreshed) return c.json({ error: 'Not authenticated — please sign in' }, 401);
     token = refreshed.access_token;
   }
 
   try {
-    const { data: { user }, error } = await supabaseAuth.auth.getUser(token);
+    const supabaseAuth = getSupabaseAuth(c.env);
+    const supabase = getSupabase(c.env);
+    let { data: { user }, error } = await supabaseAuth.auth.getUser(token);
 
     if (error || !user) {
-      // Token may have expired; try refresh
-      const refreshed = await tryRefresh(req, res);
+      const refreshed = await tryRefresh(c);
       if (!refreshed) {
-        clearSessionCookies(res);
-        res.status(401).json({ error: 'Session expired — please sign in again' });
-        return;
+        clearSessionCookies(c);
+        return c.json({ error: 'Session expired — please sign in again' }, 401);
       }
-      // Re-fetch user with new token
-      const { data: { user: refreshedUser } } = await supabaseAuth.auth.getUser(refreshed.access_token);
-      if (!refreshedUser) {
-        clearSessionCookies(res);
-        res.status(401).json({ error: 'Session expired — please sign in again' });
-        return;
+      const { data } = await supabaseAuth.auth.getUser(refreshed.access_token);
+      user = data.user;
+      if (!user) {
+        clearSessionCookies(c);
+        return c.json({ error: 'Session expired — please sign in again' }, 401);
       }
     }
 
-    // Load profile
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('*')
-      .eq('id', user!.id)
+      .eq('id', user.id)
       .single();
 
     if (profileError || !profile) {
-      res.status(401).json({ error: 'Profile not found — please sign in again' });
-      return;
+      return c.json({ error: 'Profile not found — please sign in again' }, 401);
     }
+    if (profile.status === 'suspended') return c.json({ error: 'Account is suspended' }, 403);
+    if (profile.status === 'rejected') return c.json({ error: 'Account was rejected' }, 403);
 
-    if (profile.status === 'suspended') {
-      res.status(403).json({ error: 'Account is suspended' });
-      return;
-    }
-
-    if (profile.status === 'rejected') {
-      res.status(403).json({ error: 'Account was rejected' });
-      return;
-    }
-
-    req.userId  = user!.id;
-    req.profile = profile as Profile;
-    next();
+    c.set('userId', user.id);
+    c.set('profile', profile as Profile);
+    await next();
   } catch (err) {
     console.error('verifyJWT error:', err);
-    res.status(401).json({ error: 'Token verification failed' });
+    return c.json({ error: 'Token verification failed' }, 401);
   }
 }
 
 // ── JWT-or-TempToken middleware ─────────────────────────
 
-export async function verifyJWTOrTemp(
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  const tempToken = req.headers['x-temp-token'] as string | undefined;
+export async function verifyJWTOrTemp(c: AuthedContext, next: Next): Promise<Response | void> {
+  const tempToken = c.req.header('x-temp-token');
+  const token = extractToken(c);
 
-  // Prefer cookie session if present
-  const token = extractToken(req);
-  if (token) {
-    return verifyJWT(req, res, next);
-  }
+  if (token) return verifyJWT(c, next);
 
-  // Try temp token (for anonymous read-only access links)
   if (tempToken) {
+    const supabase = getSupabase(c.env);
     const { data: link, error } = await supabase
       .from('temp_access_links')
       .select('id, allowed_pages, expires_at, max_uses, use_count, is_active')
@@ -192,25 +163,16 @@ export async function verifyJWTOrTemp(
       .eq('is_active', true)
       .single();
 
-    if (error || !link) {
-      res.status(403).json({ error: 'Invalid temp access token' });
-      return;
-    }
-
-    if (new Date(link.expires_at) < new Date()) {
-      res.status(403).json({ error: 'Temp access link has expired' });
-      return;
-    }
-
+    if (error || !link) return c.json({ error: 'Invalid temp access token' }, 403);
+    if (new Date(link.expires_at) < new Date()) return c.json({ error: 'Temp access link has expired' }, 403);
     if (link.max_uses !== null && link.use_count >= link.max_uses) {
-      res.status(403).json({ error: 'Temp access link has reached maximum uses' });
-      return;
+      return c.json({ error: 'Temp access link has reached maximum uses' }, 403);
     }
 
-    req.tempAccess = { allowed_pages: link.allowed_pages };
-    next();
+    c.set('tempAccess', { allowed_pages: link.allowed_pages });
+    await next();
     return;
   }
 
-  res.status(401).json({ error: 'Authentication required' });
+  return c.json({ error: 'Authentication required' }, 401);
 }

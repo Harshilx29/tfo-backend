@@ -1,146 +1,101 @@
-import { Router, Request, Response } from 'express';
-import { supabase } from '../lib/supabase';
+import { Hono } from 'hono';
+import { getSupabase, Env } from '../lib/supabase';
 import { requirePermission } from '../middleware/permission';
-import { verifyJWT } from '../middleware/auth';
+import { verifyJWT, AuthedContext } from '../middleware/auth';
 
-const router = Router();
-router.use(verifyJWT);
+type Vars = { userId?: string; profile?: any; tempAccess?: any };
+const router = new Hono<{ Bindings: Env; Variables: Vars }>();
+router.use('*', verifyJWT);
 
-
-// ==========================================
-// GET /companies
-// List all companies
-// ==========================================
-router.get('/', requirePermission('company.view'), async (req: Request, res: Response) => {
+// GET /companies — list all
+router.get('/', requirePermission('company.view'), async (c: AuthedContext) => {
   try {
-    const { data, error } = await supabase
-      .from('companies')
-      .select('*')
-      .order('name', { ascending: true });
-
+    const supabase = getSupabase(c.env);
+    const { data, error } = await supabase.from('companies').select('*').order('name', { ascending: true });
     if (error) {
       console.error('Error fetching companies:', error);
-      return res.status(500).json({ error: 'Failed to fetch companies' });
+      return c.json({ error: 'Failed to fetch companies' }, 500);
     }
-
-    res.json(data);
+    return c.json(data);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
-// GET /companies/dropdown
-// Lightweight endpoint for dropdown options (all authenticated users)
-// ==========================================
-router.get('/dropdown', async (req: Request, res: Response) => {
+// GET /companies/dropdown — lightweight, any authenticated user
+router.get('/dropdown', async (c: AuthedContext) => {
   try {
+    const supabase = getSupabase(c.env);
     const { data, error } = await supabase
       .from('companies')
       .select('id, name')
       .eq('show_in_dropdown', true)
       .order('name', { ascending: true });
-
     if (error) {
       console.error('Error fetching company dropdown:', error);
-      return res.status(500).json({ error: 'Failed to fetch companies' });
+      return c.json({ error: 'Failed to fetch companies' }, 500);
     }
-
-    res.json(data);
+    return c.json(data);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // GET /companies/:id
-// Get a single company by ID
-// ==========================================
-router.get('/:id', requirePermission('company.view'), async (req: Request, res: Response) => {
+router.get('/:id', requirePermission('company.view'), async (c: AuthedContext) => {
   try {
-    const { id } = req.params;
-    const { data, error } = await supabase
-      .from('companies')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (error) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-
-    res.json(data);
+    const id = c.req.param('id');
+    const supabase = getSupabase(c.env);
+    const { data, error } = await supabase.from('companies').select('*').eq('id', id).single();
+    if (error) return c.json({ error: 'Company not found' }, 404);
+    return c.json(data);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // GET /companies/:id/batches
-// Get associated batches for a company
-// ==========================================
-router.get('/:id/batches', requirePermission('company.view'), async (req: Request, res: Response) => {
+router.get('/:id/batches', requirePermission('company.view'), async (c: AuthedContext) => {
   try {
-    const { id } = req.params;
-    
-    // First get the company to know its name
+    const id = c.req.param('id');
+    const supabase = getSupabase(c.env);
     const { data: company, error: companyError } = await supabase
       .from('companies')
       .select('name')
       .eq('id', id)
       .single();
+    if (companyError || !company) return c.json({ error: 'Company not found' }, 404);
 
-    if (companyError || !company) {
-      return res.status(404).json({ error: 'Company not found' });
-    }
-
-    // Now query winding_details matching the name or company_id
-    // We check both because historical data only has the name string, 
-    // while new data will have the company_id.
     const { data: batches, error: batchesError } = await supabase
       .from('winding_details')
       .select('uid, date, yarn_type, lot_number')
       .or(`company.eq."${company.name}",company_id.eq.${id}`)
       .order('date', { ascending: false });
-
     if (batchesError) {
       console.error('Error fetching associated batches:', batchesError);
-      return res.status(500).json({ error: 'Failed to fetch batches' });
+      return c.json({ error: 'Failed to fetch batches' }, 500);
     }
-
-    res.json(batches);
+    return c.json(batches);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // POST /companies
-// Create a new company
-// ==========================================
-router.post('/', requirePermission('company.manage'), async (req: Request, res: Response) => {
+router.post('/', requirePermission('company.manage'), async (c: AuthedContext) => {
   try {
-    const { name, address, gst_number, phone_number, show_in_dropdown } = req.body;
+    const body = await c.req.json();
+    const { name, address, gst_number, phone_number, show_in_dropdown } = body;
+    if (!name) return c.json({ error: 'Company name is required' }, 400);
 
-    if (!name) {
-      return res.status(400).json({ error: 'Company name is required' });
-    }
-
-    // Check GST uniqueness if provided
+    const supabase = getSupabase(c.env);
     if (gst_number) {
-      const { data: existing } = await supabase
-        .from('companies')
-        .select('id')
-        .eq('gst_number', gst_number)
-        .single();
-      
-      if (existing) {
-        return res.status(400).json({ error: 'A company with this GST number already exists' });
-      }
+      const { data: existing } = await supabase.from('companies').select('id').eq('gst_number', gst_number).single();
+      if (existing) return c.json({ error: 'A company with this GST number already exists' }, 400);
     }
 
     const { data, error } = await supabase
@@ -150,37 +105,30 @@ router.post('/', requirePermission('company.manage'), async (req: Request, res: 
         address: address || null,
         gst_number: gst_number || null,
         phone_number: phone_number || null,
-        show_in_dropdown: show_in_dropdown !== undefined ? show_in_dropdown : true
+        show_in_dropdown: show_in_dropdown !== undefined ? show_in_dropdown : true,
       })
       .select()
       .single();
-
     if (error) {
       console.error('Error creating company:', error);
-      return res.status(500).json({ error: 'Failed to create company' });
+      return c.json({ error: 'Failed to create company' }, 500);
     }
-
-    res.status(201).json(data);
+    return c.json(data, 201);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
-// ==========================================
 // PUT /companies/:id
-// Update an existing company
-// ==========================================
-router.put('/:id', requirePermission('company.manage'), async (req: Request, res: Response) => {
+router.put('/:id', requirePermission('company.manage'), async (c: AuthedContext) => {
   try {
-    const { id } = req.params;
-    const { name, address, gst_number, phone_number, show_in_dropdown } = req.body;
+    const id = c.req.param('id');
+    const body = await c.req.json();
+    const { name, address, gst_number, phone_number, show_in_dropdown } = body;
+    if (!name) return c.json({ error: 'Company name is required' }, 400);
 
-    if (!name) {
-      return res.status(400).json({ error: 'Company name is required' });
-    }
-
-    // Check GST uniqueness if provided (exclude current company)
+    const supabase = getSupabase(c.env);
     if (gst_number) {
       const { data: existing } = await supabase
         .from('companies')
@@ -188,10 +136,7 @@ router.put('/:id', requirePermission('company.manage'), async (req: Request, res
         .eq('gst_number', gst_number)
         .neq('id', id)
         .single();
-      
-      if (existing) {
-        return res.status(400).json({ error: 'A company with this GST number already exists' });
-      }
+      if (existing) return c.json({ error: 'A company with this GST number already exists' }, 400);
     }
 
     const { data, error } = await supabase
@@ -201,21 +146,19 @@ router.put('/:id', requirePermission('company.manage'), async (req: Request, res
         address: address || null,
         gst_number: gst_number || null,
         phone_number: phone_number || null,
-        show_in_dropdown: show_in_dropdown !== undefined ? show_in_dropdown : true
+        show_in_dropdown: show_in_dropdown !== undefined ? show_in_dropdown : true,
       })
       .eq('id', id)
       .select()
       .single();
-
     if (error) {
       console.error('Error updating company:', error);
-      return res.status(500).json({ error: 'Failed to update company' });
+      return c.json({ error: 'Failed to update company' }, 500);
     }
-
-    res.json(data);
+    return c.json(data);
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
