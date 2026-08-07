@@ -21,12 +21,29 @@ type Vars = { userId?: string; profile?: any; tempAccess?: any };
 const app = new Hono<{ Bindings: Env; Variables: Vars }>();
 
 // ── CORS — same allow-list logic as the old rawFrontendUrls handling ──
-app.use('*', async (c, next) => {
+app.use('*', (c, next) => {
   const raw = c.env.FRONTEND_URL || 'http://localhost:5173';
-  const allowed = raw.includes(',') ? raw.split(',').map((u) => u.trim()).filter(Boolean) : [raw.trim()];
+  const allowed = raw.split(',').map((u) => u.trim()).filter(Boolean);
   return cors({
-    origin: allowed,
+    origin: (origin) => {
+      if (!origin) return allowed[0];
+      // Always allow localhost/127.0.0.1 for local dev
+      if (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) {
+        return origin;
+      }
+      // Allow any Vercel domain associated with the project
+      if (origin.endsWith('.vercel.app') || origin.includes('.vercel.app')) {
+        return origin;
+      }
+      // Allow exact match from FRONTEND_URL configured values
+      if (allowed.includes(origin)) {
+        return origin;
+      }
+      return allowed[0];
+    },
     credentials: true,
+    allowHeaders: ['Content-Type', 'Authorization', 'Cookie'],
+    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   })(c, next);
 });
 
