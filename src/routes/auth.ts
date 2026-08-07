@@ -97,6 +97,7 @@ router.get('/google', authLimiter, async (c: AuthedContext) => {
     redirect_to: callbackUrl,
     code_challenge: challenge,
     code_challenge_method: 's256',
+    prompt: 'select_account',
   });
 
   return c.redirect(`${c.env.SUPABASE_URL}/auth/v1/authorize?${params.toString()}`);
