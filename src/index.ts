@@ -42,7 +42,7 @@ app.use('*', (c, next) => {
       return allowed[0];
     },
     credentials: true,
-    allowHeaders: ['Content-Type', 'Authorization', 'Cookie'],
+    allowHeaders: ['Content-Type', 'Authorization', 'Cookie', 'Cache-Control'],
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   })(c, next);
 });
