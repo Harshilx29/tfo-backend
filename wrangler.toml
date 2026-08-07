@@ -10,7 +10,7 @@ class_name = "RealtimeRoom"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["RealtimeRoom"]
+new_sqlite_classes = ["RealtimeRoom"]
 
 # ── Cloudflare native rate limiting (replaces express-rate-limit) ─
 # One binding per limiter you need distinct limits for.
@@ -47,3 +47,9 @@ enabled = true
 [dev]
 port = 3001
 
+[vars]
+SUPABASE_URL = "https://ssvjmslvrtpslbtymole.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNzdmptc2x2cnRwc2xidHltb2xlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM1MDQ5MTksImV4cCI6MjA5OTA4MDkxOX0.oPBNpsxGfokwojayooHm8qD4oP3T0gYqDyowHninVB8"
+BACKEND_URL = "https://track-manager-backend.harshilx29.workers.dev"
+FRONTEND_URL = "https://qx3cjcgk-5173.inc1.devtunnels.ms"
+ADMIN_EMAIL = "hhx93024@gmail.com"
