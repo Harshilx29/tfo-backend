@@ -22,6 +22,7 @@ export interface Env {
   API_RATE_LIMITER: { limit: (opts: { key: string }) => Promise<{ success: boolean }> };
   AUTH_RATE_LIMITER: { limit: (opts: { key: string }) => Promise<{ success: boolean }> };
   TEMP_LINK_RATE_LIMITER: { limit: (opts: { key: string }) => Promise<{ success: boolean }> };
+  ASSETS: Fetcher;
 }
 
 /**

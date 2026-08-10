@@ -51,5 +51,9 @@ port = 3001
 SUPABASE_URL = "https://dfbpgljrgtamhsukfgir.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRmYnBnbGpyZ3RhbWhzdWtmZ2lyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQ4MDAzNzUsImV4cCI6MjEwMDM3NjM3NX0.HpJLvoZaK8GLld5vwmi35xGC9pKos9PyZC5TJPvNaLc"
 BACKEND_URL = "https://track-manager-backend.harshilx29.workers.dev"
-FRONTEND_URL = "https://tfo-frontend.vercel.app"
+FRONTEND_URL = "https://track-manager-backend.harshilx29.workers.dev"
 ADMIN_EMAIL = "hhx93024@gmail.com"
+
+[assets]
+directory = "../frontend/dist"
+binding = "ASSETS"

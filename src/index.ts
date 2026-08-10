@@ -86,8 +86,33 @@ app.route('/yarns', yarnsRoutes);
 app.route('/cop-colors', copColorsRoutes);
 app.route('/machines', machinesRoutes);
 
-// ── 404 ──
-app.notFound((c) => c.json({ error: 'Not found' }, 404));
+// ── Fallback to static assets / 404 handler ──
+app.notFound(async (c) => {
+  if (c.env.ASSETS) {
+    try {
+      const res = await c.env.ASSETS.fetch(c.req.raw);
+      if (res.status !== 404) {
+        return res;
+      }
+
+      // If it's a 404 but not an API request, serve index.html (SPA fallback)
+      const path = c.req.path;
+      const apiPrefixes = [
+        '/auth', '/dashboard', '/companies', '/track', '/users',
+        '/temp-links', '/yarns', '/cop-colors', '/machines', '/health'
+      ];
+      const isApi = apiPrefixes.some(prefix => path.startsWith(prefix));
+
+      if (!isApi) {
+        const indexReq = new Request(new URL('/index.html', c.req.url).toString(), c.req.raw);
+        return await c.env.ASSETS.fetch(indexReq);
+      }
+    } catch (err) {
+      console.error('Error fetching static asset:', err);
+    }
+  }
+  return c.json({ error: 'Not found' }, 404);
+});
 
 // ── Error handler ──
 app.onError((err, c) => {
