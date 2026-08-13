@@ -20,7 +20,7 @@ const confirmBodySchema = z.object({
 });
 
 // ── GET /batch-log/pending ───────────────────────────────────
-// Fetch all pending rows where file_number IS NULL and confirmed IS TRUE
+// Fetch all pending rows where file_number IS NULL and is_completed IS TRUE
 router.get(
   '/pending',
   requirePermission('batchlog.view'),
@@ -28,15 +28,16 @@ router.get(
     try {
       const supabase = getSupabase(c.env);
 
-      // Try selecting with confirmed column
+      // Select rows where file_number is null/empty and batch is completed
       const { data, error } = await supabase
         .from('main')
-        .select('id, uid, created_at, confirmed')
+        .select('id, uid, created_at, is_completed, confirmed')
         .or('file_number.is.null,file_number.eq.""')
+        .eq('is_completed', true)
         .order('created_at', { ascending: true });
 
       if (error) {
-        // Fallback if confirmed column is not yet created on database
+        // Fallback if columns are not yet created on database
         const { data: fallbackData, error: fallbackErr } = await supabase
           .from('main')
           .select('id, uid, created_at')
@@ -47,9 +48,9 @@ router.get(
         return c.json(fallbackData ?? []);
       }
 
-      // Only allow rows where confirmed is true (or true by default)
-      const confirmedRows = (data ?? []).filter((r: any) => r.confirmed !== false);
-      return c.json(confirmedRows);
+      // Only allow rows where confirmed is true (or not false) and is_completed is true
+      const validRows = (data ?? []).filter((r: any) => r.confirmed !== false && r.is_completed === true);
+      return c.json(validRows);
     } catch (err: unknown) {
       return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
     }
@@ -100,7 +101,7 @@ router.get(
 );
 
 // ── POST /batch-log/confirm ──────────────────────────────────
-// Conditional update: WHERE uid = $1 AND (file_number IS NULL OR file_number = '')
+// Conditional update: WHERE uid = $1 AND is_completed = true AND (file_number IS NULL OR file_number = '')
 router.post(
   '/confirm',
   requirePermission('batchlog.view'),
@@ -119,11 +120,12 @@ router.post(
 
       await Promise.all(
         records.map(async ({ uid, file_number }) => {
-          // Conditional update: only succeeds if file_number is still null/empty
+          // Conditional update: only succeeds if batch is completed and file_number is still null/empty
           const { data, error } = await supabase
             .from('main')
             .update({ file_number })
             .eq('uid', uid)
+            .eq('is_completed', true)
             .or('file_number.is.null,file_number.eq.""')
             .select('uid, file_number');
 
