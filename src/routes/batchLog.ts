@@ -20,21 +20,36 @@ const confirmBodySchema = z.object({
 });
 
 // ── GET /batch-log/pending ───────────────────────────────────
-// Fetch all pending rows where file_number IS NULL
+// Fetch all pending rows where file_number IS NULL and confirmed IS TRUE
 router.get(
   '/pending',
   requirePermission('batchlog.view'),
   async (c: AuthedContext) => {
     try {
       const supabase = getSupabase(c.env);
+
+      // Try selecting with confirmed column
       const { data, error } = await supabase
         .from('main')
-        .select('id, uid, created_at')
+        .select('id, uid, created_at, confirmed')
         .or('file_number.is.null,file_number.eq.""')
         .order('created_at', { ascending: true });
 
-      if (error) throw error;
-      return c.json(data ?? []);
+      if (error) {
+        // Fallback if confirmed column is not yet created on database
+        const { data: fallbackData, error: fallbackErr } = await supabase
+          .from('main')
+          .select('id, uid, created_at')
+          .or('file_number.is.null,file_number.eq.""')
+          .order('created_at', { ascending: true });
+
+        if (fallbackErr) throw fallbackErr;
+        return c.json(fallbackData ?? []);
+      }
+
+      // Only allow rows where confirmed is true (or true by default)
+      const confirmedRows = (data ?? []).filter((r: any) => r.confirmed !== false);
+      return c.json(confirmedRows);
     } catch (err: unknown) {
       return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
     }
