@@ -156,29 +156,5 @@ router.post(
   }
 );
 
-// ── GET /batch-log/recent ────────────────────────────────────
-// Returns the 50 most recently file-numbered records.
-router.get(
-  '/recent',
-  requirePermission('batchlog.view'),
-  async (c: AuthedContext) => {
-    try {
-      const supabase = getSupabase(c.env);
-      const { data, error } = await supabase
-        .from('main')
-        .select('uid, file_number, created_at')
-        .not('file_number', 'is', null)
-        .neq('file_number', '')
-        .order('created_at', { ascending: false })
-        .limit(50);
-
-      if (error) throw error;
-      return c.json(data ?? []);
-    } catch (err: unknown) {
-      return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
-    }
-  }
-);
-
 export default router;
 
