@@ -468,7 +468,67 @@ router.put(
         .single();
 
       if (error) throw error;
+
+      // Automatically mark batch as completed in main table upon Warping submit
+      await supabase
+        .from('main')
+        .update({ is_completed: true })
+        .eq('uid', uid);
+
       return c.json(data);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      return c.json({ error: msg }, 500);
+    }
+  }
+);
+
+// ── PUT /track/:uid/complete ───────────────────────────
+router.put(
+  '/:uid/complete',
+  verifyJWT,
+  requirePermission('track.section2.write'),
+  async (c: AuthedContext) => {
+    const uidParam = c.req.param('uid');
+    const uidParsed = uidSchema.safeParse(uidParam);
+    if (!uidParsed.success) {
+      return c.json({ error: 'Invalid UID', details: uidParsed.error.issues.map(i => i.message) }, 400);
+    }
+    const uid = uidParsed.data;
+    if (!uid) return c.json({ error: 'Invalid UID' }, 400);
+
+    try {
+      const supabase = getSupabase(c.env);
+      await ensureMainExists(c, uid);
+
+      const [{ data: boiler }, { data: tfo }, { data: machine }, { data: warping }] = await Promise.all([
+        supabase.from('boiler_details').select('cops').eq('uid', uid).maybeSingle(),
+        supabase.from('tfo_details').select('cops').eq('uid', uid).maybeSingle(),
+        supabase.from('machine_log').select('cops').eq('uid', uid),
+        supabase.from('warping').select('id').eq('uid', uid).maybeSingle(),
+      ]);
+
+      const targetCops = Number(boiler?.cops) || Number(tfo?.cops) || 0;
+      const totalMachineCops = (machine || []).reduce((sum: number, r: any) => sum + (Number(r.cops) || 0), 0);
+
+      const isWarpingDone = !!warping;
+      const isMachineDone = targetCops > 0 && totalMachineCops === targetCops;
+
+      if (!isWarpingDone && !isMachineDone) {
+        return c.json({
+          error: `Cannot complete batch: Total cops used in Machine Matrix (${totalMachineCops}) does not equal total COPs in Boiler (${targetCops}).`,
+        }, 400);
+      }
+
+      const { data, error } = await supabase
+        .from('main')
+        .update({ is_completed: true })
+        .eq('uid', uid)
+        .select()
+        .single();
+
+      if (error) throw error;
+      return c.json({ success: true, main: data });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
       return c.json({ error: msg }, 500);
