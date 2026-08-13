@@ -20,7 +20,7 @@ const confirmBodySchema = z.object({
 });
 
 // ── GET /batch-log/pending ───────────────────────────────────
-// Fetch up to 80 pending rows where file_number IS NULL
+// Fetch all pending rows where file_number IS NULL
 router.get(
   '/pending',
   requirePermission('batchlog.view'),
@@ -31,8 +31,7 @@ router.get(
         .from('main')
         .select('id, uid, created_at')
         .or('file_number.is.null,file_number.eq.""')
-        .order('created_at', { ascending: true })
-        .limit(80);
+        .order('created_at', { ascending: true });
 
       if (error) throw error;
       return c.json(data ?? []);
