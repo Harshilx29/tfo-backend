@@ -14,6 +14,7 @@ import tempLinksRoutes from './routes/tempLinks';
 import yarnsRoutes from './routes/yarns';
 import copColorsRoutes from './routes/copColors';
 import machinesRoutes from './routes/machines';
+import batchLogRoutes from './routes/batchLog';
 
 export { RealtimeRoom } from './do/RealtimeRoom';
 
@@ -85,6 +86,7 @@ app.route('/temp-links', tempLinksRoutes);
 app.route('/yarns', yarnsRoutes);
 app.route('/cop-colors', copColorsRoutes);
 app.route('/machines', machinesRoutes);
+app.route('/batch-log', batchLogRoutes);
 
 // ── Fallback to static assets / 404 handler ──
 app.notFound(async (c) => {
@@ -99,7 +101,7 @@ app.notFound(async (c) => {
       const path = c.req.path;
       const apiPrefixes = [
         '/auth', '/dashboard', '/companies', '/track', '/users',
-        '/temp-links', '/yarns', '/cop-colors', '/machines', '/health'
+        '/temp-links', '/yarns', '/cop-colors', '/machines', '/batch-log', '/health'
       ];
       const isApi = apiPrefixes.some(prefix => path.startsWith(prefix));
 
