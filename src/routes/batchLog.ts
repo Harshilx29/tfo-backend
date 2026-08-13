@@ -114,14 +114,30 @@ router.post(
             .select('uid, file_number');
 
           if (error) {
-            results.push({ uid, file_number, ok: false, error: error.message });
+            const isUniqueViolation =
+              error.code === '23505' ||
+              (error.message &&
+                (error.message.toLowerCase().includes('unique') ||
+                 error.message.toLowerCase().includes('duplicate') ||
+                 error.message.includes('23505')));
+
+            if (isUniqueViolation) {
+              results.push({
+                uid,
+                file_number,
+                ok: false,
+                error: `Conflict: Label "${file_number}" was claimed by another device at the same time.`,
+              });
+            } else {
+              results.push({ uid, file_number, ok: false, error: error.message });
+            }
           } else if (!data || data.length === 0) {
-            // Affected row count is 0 -> conflict
+            // Affected row count is 0 -> conflict (already claimed)
             results.push({
               uid,
               file_number,
               ok: false,
-              error: 'Conflict: This batch has already been assigned or claimed by another device.',
+              error: `Conflict: Paper "${uid}" was already claimed or updated by another device.`,
             });
           } else {
             results.push({ uid, file_number, ok: true });
