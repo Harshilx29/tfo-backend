@@ -149,7 +149,7 @@ router.get(
 router.put(
   '/:uid/winding',
   verifyJWT,
-  requirePermission('track.winding.save'),
+  requirePermission('track.section1.write', 'track.section1.update', 'track.winding.save'),
   async (c: AuthedContext) => {
     const uidParam = c.req.param('uid');
     const uidParsed = uidSchema.safeParse(uidParam);
@@ -267,7 +267,7 @@ router.put(
 router.put(
   '/:uid/tfo',
   verifyJWT,
-  requirePermission('track.tfo.save'),
+  requirePermission('track.section1.write', 'track.section1.update', 'track.tfo.save'),
   async (c: AuthedContext) => {
     const uidParam = c.req.param('uid');
     const uidParsed = uidSchema.safeParse(uidParam);
@@ -382,7 +382,7 @@ router.put(
 router.put(
   '/:uid/boiler',
   verifyJWT,
-  requirePermission('track.boiler.save'),
+  requirePermission('track.section1.write', 'track.section1.update', 'track.boiler.save'),
   async (c: AuthedContext) => {
     const uidParam = c.req.param('uid');
     const uidParsed = uidSchema.safeParse(uidParam);
@@ -439,7 +439,7 @@ router.put(
 router.put(
   '/:uid/warping',
   verifyJWT,
-  requirePermission('track.warping.save'),
+  requirePermission('track.section2.write', 'track.section2.update', 'track.warping.save'),
   async (c: AuthedContext) => {
     const uidParam = c.req.param('uid');
     const uidParsed = uidSchema.safeParse(uidParam);
@@ -487,7 +487,7 @@ router.put(
 router.put(
   '/:uid/complete',
   verifyJWT,
-  requirePermission('track.section2.write'),
+  requirePermission('track.section2.write', 'track.section2.update'),
   async (c: AuthedContext) => {
     const uidParam = c.req.param('uid');
     const uidParsed = uidSchema.safeParse(uidParam);
@@ -540,7 +540,7 @@ router.put(
 router.put(
   '/:uid/machine',
   verifyJWT,
-  requirePermission('track.machine.save'),
+  requirePermission('track.section2.write', 'track.section2.update', 'track.machine.save'),
   async (c: AuthedContext) => {
     const uidParam = c.req.param('uid');
     const uidParsed = uidSchema.safeParse(uidParam);
@@ -587,7 +587,7 @@ router.put(
 router.delete(
   '/:uid/machine/:rowId',
   verifyJWT,
-  requirePermission('track.machine.delete_row'),
+  requirePermission('track.section2.write', 'track.section2.update', 'track.machine.delete_row'),
   async (c: AuthedContext) => {
     const rowId = c.req.param('rowId');
     const rowIdNum = parseInt(rowId || '', 10);
