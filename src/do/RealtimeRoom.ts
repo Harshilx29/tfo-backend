@@ -279,19 +279,19 @@ export class RealtimeRoom {
     supabase
       .channel('rt-machines')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'machines' }, (payload) => {
-        for (const ws of this.clients.keys()) {
-          try {
-            ws.send(
-              JSON.stringify({
-                type: 'machines_update',
-                eventType: payload.eventType,
-                new: payload.new,
-                old: payload.old,
-              })
-            );
-          } catch {
-            this.clients.delete(ws);
-          }
+        const machineId = (payload.new as Record<string, unknown>)?.id || (payload.old as Record<string, unknown>)?.id;
+        if (typeof machineId === 'string' && machineId) {
+          this.scheduleEnrichedMachineBroadcast(machineId, payload.eventType, payload.old);
+        }
+      })
+      .subscribe();
+
+    supabase
+      .channel('rt-tfo-details-machines')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tfo_details' }, (payload) => {
+        const machineId = (payload.new as Record<string, unknown>)?.machine_id || (payload.old as Record<string, unknown>)?.machine_id;
+        if (typeof machineId === 'string' && machineId) {
+          this.scheduleEnrichedMachineBroadcast(machineId, payload.eventType, payload.old);
         }
       })
       .subscribe();
@@ -343,6 +343,96 @@ export class RealtimeRoom {
         }
       })
       .subscribe();
+  }
+
+  private debounceMap = new Map<string, ReturnType<typeof setTimeout>>();
+
+  private scheduleEnrichedMachineBroadcast(machineId: string, eventType: string, oldRow: any) {
+    if (!machineId) return;
+
+    if (this.debounceMap.has(machineId)) {
+      clearTimeout(this.debounceMap.get(machineId)!);
+    }
+
+    const timer = setTimeout(async () => {
+      this.debounceMap.delete(machineId);
+      await this.broadcastEnrichedMachine(machineId, eventType, oldRow);
+    }, 100);
+
+    this.debounceMap.set(machineId, timer);
+  }
+
+  private async broadcastEnrichedMachine(machineId: string, eventType: string, oldRow: any) {
+    try {
+      const supabase = getSupabase(this.env);
+
+      const { data: row, error } = await (supabase
+        .from('machines')
+        .select(`
+          *,
+          tfo_details!tfo_details_machine_id_fkey!left(
+            uid,
+            tpm,
+            loading_date,
+            color_s,
+            color_z,
+            cop_color_s:cop_colors!tfo_details_color_s_id_fkey!left(id, name, hex_code),
+            cop_color_z:cop_colors!tfo_details_color_z_id_fkey!left(id, name, hex_code)
+          )
+        ` as any)
+        .eq('id', machineId)
+        .is('tfo_details.unloading_date', null)
+        .maybeSingle() as any);
+
+      if (error || !row) {
+        if (eventType === 'DELETE') {
+          this.broadcastToAll({ type: 'machines_update', eventType: 'DELETE', old: oldRow });
+        }
+        return;
+      }
+
+      const activeTfoList = row.tfo_details || [];
+      const activeTfo = Array.isArray(activeTfoList) ? activeTfoList[0] : activeTfoList;
+
+      const { tfo_details: _, ...machineData } = row;
+
+      const enrichedMachine = {
+        ...machineData,
+        active_batch: activeTfo
+          ? {
+              uid: activeTfo.uid,
+              tpm: activeTfo.tpm ?? null,
+              loading_date: activeTfo.loading_date ?? null,
+              color_s: activeTfo.cop_color_s
+                ? { name: activeTfo.cop_color_s.name, hex_code: activeTfo.cop_color_s.hex_code }
+                : activeTfo.color_s ? { name: activeTfo.color_s, hex_code: null } : null,
+              color_z: activeTfo.cop_color_z
+                ? { name: activeTfo.cop_color_z.name, hex_code: activeTfo.cop_color_z.hex_code }
+                : activeTfo.color_z ? { name: activeTfo.color_z, hex_code: null } : null,
+            }
+          : null,
+      };
+
+      this.broadcastToAll({
+        type: 'machines_update',
+        eventType,
+        new: enrichedMachine,
+        old: oldRow,
+      });
+    } catch (err) {
+      console.error('Failed to broadcast enriched machine:', err);
+    }
+  }
+
+  private broadcastToAll(msg: Record<string, unknown>) {
+    const json = JSON.stringify(msg);
+    for (const ws of this.clients.keys()) {
+      try {
+        ws.send(json);
+      } catch {
+        this.clients.delete(ws);
+      }
+    }
   }
 
   /** Mirrors updateSocketPermissionsForUser from the old bridge. */

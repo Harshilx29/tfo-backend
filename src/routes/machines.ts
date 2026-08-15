@@ -38,21 +38,60 @@ router.get('/dropdown', async (c: AuthedContext) => {
   }
 });
 
+// Helper to format enriched machine object with active_batch details
+export function formatEnrichedMachine(row: any) {
+  if (!row) return null;
+  const activeTfoList = row.tfo_details || [];
+  const activeTfo = Array.isArray(activeTfoList) ? activeTfoList[0] : activeTfoList;
+
+  const { tfo_details: _, ...machineData } = row;
+
+  return {
+    ...machineData,
+    active_batch: activeTfo
+      ? {
+          uid: activeTfo.uid,
+          tpm: activeTfo.tpm ?? null,
+          loading_date: activeTfo.loading_date ?? null,
+          color_s: activeTfo.cop_color_s
+            ? { name: activeTfo.cop_color_s.name, hex_code: activeTfo.cop_color_s.hex_code }
+            : activeTfo.color_s ? { name: activeTfo.color_s, hex_code: null } : null,
+          color_z: activeTfo.cop_color_z
+            ? { name: activeTfo.cop_color_z.name, hex_code: activeTfo.cop_color_z.hex_code }
+            : activeTfo.color_z ? { name: activeTfo.color_z, hex_code: null } : null,
+        }
+      : null,
+  };
+}
+
 // GET /machines
 router.get('/', requirePermission('machine.view'), async (c: AuthedContext) => {
   try {
     const supabase = getSupabase(c.env);
-    const { data, error } = await supabase
+    const { data: rows, error } = await (supabase
       .from('machines')
-      .select('*')
-      .order('machine_number', { ascending: true });
+      .select(`
+        *,
+        tfo_details!tfo_details_machine_id_fkey!left(
+          uid,
+          tpm,
+          loading_date,
+          color_s,
+          color_z,
+          cop_color_s:cop_colors!tfo_details_color_s_id_fkey!left(id, name, hex_code),
+          cop_color_z:cop_colors!tfo_details_color_z_id_fkey!left(id, name, hex_code)
+        )
+      ` as any)
+      .is('tfo_details.unloading_date', null)
+      .order('machine_number', { ascending: true }) as any);
 
     if (error) {
-      console.error('Error fetching machines:', error);
+      console.error('Error fetching enriched machines:', error);
       return c.json({ error: 'Failed to fetch machines' }, 500);
     }
 
-    return c.json(data ?? []);
+    const enriched = (rows ?? []).map(formatEnrichedMachine);
+    return c.json(enriched);
   } catch (err) {
     console.error('Unexpected error:', err);
     return c.json({ error: 'Internal server error' }, 500);

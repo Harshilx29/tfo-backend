@@ -309,67 +309,27 @@ router.put(
           }, 400);
         }
 
-        // ── LOAD: loading_date is being set ───────────────────
+        // Store FK to machine
         if (incomingLoadDate) {
-          if (machine.occupancy_status === 'loaded') {
-            // Check if THIS batch already owns the machine (idempotent re-save allowed)
-            const { data: existingTfo } = await supabase
-              .from('tfo_details')
-              .select('machine_id')
-              .eq('uid', uid)
-              .maybeSingle();
-
-            const alreadyOwned = existingTfo?.machine_id === machine.id;
-
-            if (!alreadyOwned) {
-              return c.json({
-                error: `Machine ${incomingMachineNo} is currently in use and cannot be loaded again until unloaded.`,
-              }, 409);
-            }
-          }
-
-          // Set machine to loaded and store FK
-          await supabase
-            .from('machines')
-            .update({ occupancy_status: 'loaded' })
-            .eq('id', machine.id);
-
           rest.machine_id = machine.id;
         }
-
-        // ── UNLOAD: unloading_date is being set ───────────────
-        if (incomingUnloadDate) {
-          // Free the machine — it's been unloaded
-          await supabase
-            .from('machines')
-            .update({ occupancy_status: 'free' })
-            .eq('id', machine.id);
-        }
-      } else if (incomingUnloadDate) {
-        // tfo_no not sent in this save but unloading_date provided —
-        // look up existing machine_id for this uid to free the machine
-        const { data: existingTfo } = await supabase
-          .from('tfo_details')
-          .select('machine_id')
-          .eq('uid', uid)
-          .maybeSingle();
-
-        if (existingTfo?.machine_id) {
-          await supabase
-            .from('machines')
-            .update({ occupancy_status: 'free' })
-            .eq('id', existingTfo.machine_id);
-        }
       }
-      // ──────────────────────────────────────────────────────────
 
+      // Upsert into tfo_details (DB trigger automatically syncs machines.occupancy_status)
       const { data, error } = await supabase
         .from('tfo_details')
         .upsert({ uid, ...rest }, { onConflict: 'uid' })
         .select()
         .single();
 
-      if (error) throw error;
+      if (error) {
+        if (error.code === '23505' || error.message?.includes('idx_tfo_one_open_batch_per_machine')) {
+          return c.json({
+            error: `Machine ${incomingMachineNo || 'selected'} is currently loaded with another active batch. Unload the active batch before loading a new one.`,
+          }, 409);
+        }
+        throw error;
+      }
       return c.json(data);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
