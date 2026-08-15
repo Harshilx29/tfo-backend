@@ -101,7 +101,8 @@ router.get(
 );
 
 // ── POST /batch-log/confirm ──────────────────────────────────
-// Conditional update: WHERE uid = $1 AND is_completed = true AND (file_number IS NULL OR file_number = '')
+// Atomic confirmation: validates all records first, then updates in a single batch.
+// If any single paper fails pre-check, 0 database updates occur and staging remains intact.
 router.post(
   '/confirm',
   requirePermission('batchlog.view'),
@@ -115,57 +116,90 @@ router.post(
 
       const supabase = getSupabase(c.env);
       const { records } = parsed.data;
+      const uids = records.map((r) => r.uid);
 
-      const results: { uid: string; file_number: string; ok: boolean; error?: string }[] = [];
+      // 1. Pre-fetch existing status for all requested UIDs
+      const { data: existingRows, error: fetchErr } = await supabase
+        .from('main')
+        .select('uid, is_completed, file_number, confirmed')
+        .in('uid', uids);
 
-      await Promise.all(
-        records.map(async ({ uid, file_number }) => {
-          // Conditional update: only succeeds if batch is completed and file_number is still null/empty
-          const { data, error } = await supabase
-            .from('main')
-            .update({ file_number })
-            .eq('uid', uid)
-            .eq('is_completed', true)
-            .or('file_number.is.null,file_number.eq.""')
-            .select('uid, file_number');
-
-          if (error) {
-            const isUniqueViolation =
-              error.code === '23505' ||
-              (error.message &&
-                (error.message.toLowerCase().includes('unique') ||
-                 error.message.toLowerCase().includes('duplicate') ||
-                 error.message.includes('23505')));
-
-            if (isUniqueViolation) {
-              results.push({
-                uid,
-                file_number,
-                ok: false,
-                error: `Conflict: Label "${file_number}" was claimed by another device at the same time.`,
-              });
-            } else {
-              results.push({ uid, file_number, ok: false, error: error.message });
-            }
-          } else if (!data || data.length === 0) {
-            // Affected row count is 0 -> conflict (already claimed)
-            results.push({
-              uid,
-              file_number,
-              ok: false,
-              error: `Conflict: Paper "${uid}" was already claimed or updated by another device.`,
-            });
-          } else {
-            results.push({ uid, file_number, ok: true });
-          }
-        })
-      );
-
-      const failed = results.filter(r => !r.ok);
-      if (failed.length > 0) {
-        return c.json({ partial: failed.length < records.length, results }, 207);
+      if (fetchErr) {
+        return c.json({ error: `Database query failed: ${fetchErr.message}` }, 500);
       }
-      return c.json({ success: true, results });
+
+      const rowMap = new Map<string, any>();
+      (existingRows ?? []).forEach((row: any) => {
+        if (row.uid) rowMap.set(row.uid.toLowerCase(), row);
+      });
+
+      // 2. Validate every record in the payload BEFORE making any changes
+      for (const { uid, file_number } of records) {
+        const row = rowMap.get(uid.toLowerCase());
+        if (!row) {
+          return c.json(
+            {
+              error: `Save aborted: Paper ${file_number} (UID "${uid}") was not found in the database.`,
+              failedUid: uid,
+              failedFileNumber: file_number,
+            },
+            400
+          );
+        }
+
+        if (row.is_completed !== true || row.confirmed === false) {
+          return c.json(
+            {
+              error: `Save aborted: Paper ${file_number} (UID "${uid}") is incomplete or unconfirmed. Please complete batch details before logging to file.`,
+              failedUid: uid,
+              failedFileNumber: file_number,
+            },
+            400
+          );
+        }
+
+        if (row.file_number && row.file_number.trim() !== '' && row.file_number !== file_number) {
+          return c.json(
+            {
+              error: `Save aborted: Paper ${file_number} (UID "${uid}") has already been logged as File #${row.file_number}.`,
+              failedUid: uid,
+              failedFileNumber: file_number,
+            },
+            400
+          );
+        }
+      }
+
+      // 3. Execute atomic updates
+      const updatedUids: string[] = [];
+      let updateError: string | null = null;
+
+      for (const { uid, file_number } of records) {
+        const { data, error } = await supabase
+          .from('main')
+          .update({ file_number })
+          .eq('uid', uid)
+          .select('uid');
+
+        if (error || !data || data.length === 0) {
+          updateError = error ? error.message : `Paper "${uid}" update failed or produced 0 changes.`;
+          break;
+        }
+        updatedUids.push(uid);
+      }
+
+      // 4. Rollback if any update failed midway
+      if (updateError) {
+        if (updatedUids.length > 0) {
+          await supabase
+            .from('main')
+            .update({ file_number: null })
+            .in('uid', updatedUids);
+        }
+        return c.json({ error: `Save aborted: ${updateError}. Rolled back all changes.` }, 500);
+      }
+
+      return c.json({ success: true, count: records.length });
     } catch (err: unknown) {
       return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
     }
