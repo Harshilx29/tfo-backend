@@ -31,13 +31,13 @@ router.get(
       // Select rows where file_number is null/empty and batch is completed
       const { data, error } = await supabase
         .from('main')
-        .select('id, uid, created_at, is_completed, confirmed')
+        .select('id, uid, created_at, is_completed')
         .or('file_number.is.null,file_number.eq.""')
         .eq('is_completed', true)
         .order('created_at', { ascending: true });
 
       if (error) {
-        // Fallback if columns are not yet created on database
+        // Fallback if is_completed column is not yet created on database
         const { data: fallbackData, error: fallbackErr } = await supabase
           .from('main')
           .select('id, uid, created_at')
@@ -48,8 +48,8 @@ router.get(
         return c.json(fallbackData ?? []);
       }
 
-      // Only allow rows where confirmed is true (or not false) and is_completed is true
-      const validRows = (data ?? []).filter((r: any) => r.confirmed !== false && r.is_completed === true);
+      // Only allow rows where is_completed is true
+      const validRows = (data ?? []).filter((r: any) => r.is_completed === true);
       return c.json(validRows);
     } catch (err: unknown) {
       return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
@@ -121,7 +121,7 @@ router.post(
       // 1. Pre-fetch existing status for all requested UIDs
       const { data: existingRows, error: fetchErr } = await supabase
         .from('main')
-        .select('uid, is_completed, file_number, confirmed')
+        .select('uid, is_completed, file_number')
         .in('uid', uids);
 
       if (fetchErr) {
@@ -147,10 +147,10 @@ router.post(
           );
         }
 
-        if (row.is_completed !== true || row.confirmed === false) {
+        if (row.is_completed !== true) {
           return c.json(
             {
-              error: `Save aborted: Paper ${file_number} (UID "${uid}") is incomplete or unconfirmed. Please complete batch details before logging to file.`,
+              error: `Save aborted: Paper ${file_number} (UID "${uid}") is incomplete. Please complete batch details before logging to file.`,
               failedUid: uid,
               failedFileNumber: file_number,
             },
