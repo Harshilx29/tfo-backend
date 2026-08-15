@@ -38,19 +38,22 @@ router.get('/dropdown', async (c: AuthedContext) => {
   }
 });
 
-// Helper to format enriched machine object with active_batch details
-export function formatEnrichedMachine(row: any) {
+// Helper to format enriched machine object with active_batch details and yarn_type
+export function formatEnrichedMachine(row: any, windingMap?: Map<string, string | null>) {
   if (!row) return null;
   const activeTfoList = row.tfo_details || [];
   const activeTfo = Array.isArray(activeTfoList) ? activeTfoList[0] : activeTfoList;
 
   const { tfo_details: _, ...machineData } = row;
+  const uid = activeTfo?.uid;
+  const yarnType = uid && windingMap ? (windingMap.get(uid) ?? null) : null;
 
   return {
     ...machineData,
     active_batch: activeTfo
       ? {
           uid: activeTfo.uid,
+          yarn_type: yarnType,
           tpm: activeTfo.tpm ?? null,
           loading_date: activeTfo.loading_date ?? null,
           color_s: activeTfo.cop_color_s
@@ -90,7 +93,30 @@ router.get('/', requirePermission('machine.view'), async (c: AuthedContext) => {
       return c.json({ error: 'Failed to fetch machines' }, 500);
     }
 
-    const enriched = (rows ?? []).map(formatEnrichedMachine);
+    // 1. Collect active UIDs for winding_details query
+    const activeUids = new Set<string>();
+    (rows ?? []).forEach((row: any) => {
+      const activeTfoList = row.tfo_details || [];
+      const activeTfo = Array.isArray(activeTfoList) ? activeTfoList[0] : activeTfoList;
+      if (activeTfo?.uid) activeUids.add(activeTfo.uid);
+    });
+
+    // 2. Secondary lookup against winding_details by active UIDs
+    const windingMap = new Map<string, string | null>();
+    if (activeUids.size > 0) {
+      const { data: windingData, error: windingErr } = await supabase
+        .from('winding_details')
+        .select('uid, yarn_type')
+        .in('uid', Array.from(activeUids));
+
+      if (!windingErr && windingData) {
+        windingData.forEach((w: any) => {
+          if (w.uid) windingMap.set(w.uid, w.yarn_type ?? null);
+        });
+      }
+    }
+
+    const enriched = (rows ?? []).map((r: any) => formatEnrichedMachine(r, windingMap));
     return c.json(enriched);
   } catch (err) {
     console.error('Unexpected error:', err);

@@ -297,6 +297,27 @@ export class RealtimeRoom {
       .subscribe();
 
     supabase
+      .channel('rt-winding-details-machines')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'winding_details' }, async (payload) => {
+        const uid =
+          (payload.new as Record<string, unknown>)?.uid || (payload.old as Record<string, unknown>)?.uid;
+        if (typeof uid === 'string' && uid) {
+          const supabaseAdmin = getSupabase(this.env);
+          const { data: activeTfo } = await supabaseAdmin
+            .from('tfo_details')
+            .select('machine_id')
+            .eq('uid', uid)
+            .is('unloading_date', null)
+            .maybeSingle();
+
+          if (activeTfo?.machine_id) {
+            this.scheduleEnrichedMachineBroadcast(activeTfo.machine_id, 'UPDATE', null);
+          }
+        }
+      })
+      .subscribe();
+
+    supabase
       .channel('rt-profiles')
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'profiles' }, async (payload) => {
         const profileId = (payload.new as Record<string, unknown>)?.id;
@@ -396,11 +417,22 @@ export class RealtimeRoom {
 
       const { tfo_details: _, ...machineData } = row;
 
+      let yarnType: string | null = null;
+      if (activeTfo?.uid) {
+        const { data: windingRow } = await supabase
+          .from('winding_details')
+          .select('yarn_type')
+          .eq('uid', activeTfo.uid)
+          .maybeSingle();
+        yarnType = windingRow?.yarn_type ?? null;
+      }
+
       const enrichedMachine = {
         ...machineData,
         active_batch: activeTfo
           ? {
               uid: activeTfo.uid,
+              yarn_type: yarnType,
               tpm: activeTfo.tpm ?? null,
               loading_date: activeTfo.loading_date ?? null,
               color_s: activeTfo.cop_color_s
