@@ -295,6 +295,8 @@ router.put(
       const incomingLoadDate: string | null  = rest.loading_date   ?? null;
       const incomingUnloadDate: string | null = rest.unloading_date ?? null;
 
+      let targetMachineId: string | null = null;
+
       if (incomingMachineNo !== null) {
         // Fetch the machine record
         const { data: machine, error: machineErr } = await supabase
@@ -309,13 +311,24 @@ router.put(
           }, 400);
         }
 
-        // Store FK to machine
-        if (incomingLoadDate) {
-          rest.machine_id = machine.id;
+        // Always attach machine_id FK whenever tfo_no is specified
+        rest.machine_id = machine.id;
+        targetMachineId = machine.id;
+      }
+
+      // If machine_id not in payload, check existing record for this UID
+      if (!targetMachineId) {
+        const { data: existingTfo } = await supabase
+          .from('tfo_details')
+          .select('machine_id, loading_date, unloading_date')
+          .eq('uid', uid)
+          .maybeSingle();
+        if (existingTfo?.machine_id) {
+          targetMachineId = existingTfo.machine_id;
         }
       }
 
-      // Upsert into tfo_details (DB trigger automatically syncs machines.occupancy_status)
+      // Upsert into tfo_details
       const { data, error } = await supabase
         .from('tfo_details')
         .upsert({ uid, ...rest }, { onConflict: 'uid' })
@@ -330,6 +343,19 @@ router.put(
         }
         throw error;
       }
+
+      // App-level fail-safe sync for machines.occupancy_status
+      if (targetMachineId) {
+        const finalLoadDate = incomingLoadDate ?? data?.loading_date ?? null;
+        const finalUnloadDate = incomingUnloadDate ?? data?.unloading_date ?? null;
+        const newStatus = (finalLoadDate && !finalUnloadDate) ? 'loaded' : 'free';
+
+        await supabase
+          .from('machines')
+          .update({ occupancy_status: newStatus })
+          .eq('id', targetMachineId);
+      }
+
       return c.json(data);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
