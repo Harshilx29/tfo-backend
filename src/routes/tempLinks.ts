@@ -103,7 +103,7 @@ router.post('/', verifyJWT, requireAdmin(), async (c: AuthedContext) => {
         token,
         label: label?.trim() || null,
         created_by: userId,
-        allowed_pages: allowed_pages ?? ['dashboard', 'track'],
+        allowed_pages: allowed_pages ?? ['dashboard', 'track', 'tfo_status', 'batch_log'],
         expires_at,
         max_uses: max_uses ?? null,
       })

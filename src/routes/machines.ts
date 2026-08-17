@@ -1,12 +1,12 @@
 import { Hono } from 'hono';
 import { getSupabase, Env } from '../lib/supabase';
-import { requirePermission } from '../middleware/permission';
-import { verifyJWT, AuthedContext } from '../middleware/auth';
+import { requirePermission, requireReadAccess } from '../middleware/permission';
+import { verifyJWT, verifyJWTOrTemp, AuthedContext } from '../middleware/auth';
 import { machineCreateSchema, machineUpdateSchema, validateData } from '../lib/validators';
 
 type Vars = { userId?: string; profile?: any; tempAccess?: any };
 const router = new Hono<{ Bindings: Env; Variables: Vars }>();
-router.use('*', verifyJWT);
+router.use('*', verifyJWTOrTemp);
 
 // GET /machines/dropdown?onlyFree=true
 router.get('/dropdown', async (c: AuthedContext) => {
@@ -68,7 +68,7 @@ export function formatEnrichedMachine(row: any, windingMap?: Map<string, string 
 }
 
 // GET /machines
-router.get('/', requirePermission('machine.view'), async (c: AuthedContext) => {
+router.get('/', requireReadAccess('dashboard', 'machine.view'), async (c: AuthedContext) => {
   try {
     const supabase = getSupabase(c.env);
     const { data: rows, error } = await (supabase
